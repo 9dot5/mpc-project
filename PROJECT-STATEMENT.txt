@@ -1,0 +1,430 @@
+﻿Project: Secure Dark Auction with Multi-Party
+Computation
+Communications Security — 2025/2026
+Instituto Superior Técnico, Universidade de Lisboa
+
+1 Overview
+In this project you will design, implement and evaluate a sealed-bid double
+auction (commonly called a dark auction) using Secure Multi-Party Com-
+putation (MPC). The auction runs on top of the MP-SPDZ framework, which
+provides several MPC protocols with different security models and performance
+characteristics.
+You will work in groups of 3 students. Each group member operates one MPC
+party (node). The three parties jointly execute the auction program without any
+single party learning the others’ private orders — only the final market outcome
+(clearing price, traded volume, and individual fills) is revealed.
+You are given the Docker infrastructure, networking configuration, input files
+and helper scripts. You are NOT given any MPC program code. Your
+task is to design and write the auction program (a .mpc file) from scratch, guided
+by the algorithm described in Section 2.
+The project spans 5 weeks, with one milestone per week.
+
+Week Milestone Weight
+1 Background study + environment setup 10 %
+2 Auction design and baseline implementation 20 %
+3 Multi-protocol comparison and measurement 20 %
+4 Performance optimisation 25 %
+5 Final report + demo 25 %
+
+2 Background: What Is a Dark Auction?
+A dark auction (or dark pool call auction) is a market mechanism used in fi-
+nancial exchanges where buy and sell orders are submitted secretly and matched
+simultaneously at a single uniform price. Unlike a continuous exchange — where
+every new order is immediately visible to all participants — a dark auction col-
+lects orders during a submission window and only reveals the result after the
+window closes.
+
+1
+
+
+
+2.1 Orders
+There are two kinds of orders:
+
+• Buy (bid) order: “I want to buy q units at up to p euros per unit.”
+The bid price is the maximum the buyer is willing to pay.
+
+• Sell (ask) order: “I want to sell q units at no less than p euros per unit.”
+The ask price is the minimum the seller will accept.
+
+An order is a tuple (price, quantity).
+
+2.2 Demand and Supply Curves
+Given a candidate price 𝑝:
+
+𝐷(𝑝) = ∑ bid_qty𝑖 𝑆(𝑝) = ∑ ask_qty𝑗
+𝑖∈bids 𝑗∈asks
+
+bid_price𝑖≥𝑝 ask_price𝑗≤𝑝
+
+• 𝐷(𝑝) (the demand) is the total quantity buyers are willing to purchase at
+price 𝑝 or higher. It is a non-increasing step function of 𝑝.
+
+• 𝑆(𝑝) (the supply) is the total quantity sellers are willing to sell at price 𝑝
+or lower. It is a non-decreasing step function of 𝑝.
+
+2.3 Clearing Price and Transacted Volume
+The transacted volume at price 𝑝 is:
+
+𝑉 (𝑝) = min(𝐷(𝑝), 𝑆(𝑝))
+The goal is to find the price 𝑝∗ that maximises 𝑉 (𝑝). This price is called the
+clearing price.
+When multiple prices yield the same maximum volume (a plateau), a common
+tie-breaking rule is to pick the midpoint of the plateau:
+
+𝑝∗ = 𝑝low + 𝑝high
+2
+
+where 𝑝low is the lowest and 𝑝high the highest price achieving 𝑉 ∗.
+
+2.4 Pro-Rata Allocation
+At the clearing price, one side of the market is typically over-subscribed (demand
+> supply, or vice versa). The over-subscribed side must be rationed. Pro-rata
+allocation distributes the available volume in proportion to each eligible order’s
+quantity:
+
+2
+
+
+
+fill𝑖 = ⌊𝑞𝑖 × 𝑉 ∗
+
+∑𝑗 𝑞 ⌋
+𝑗
+
+where 𝑞𝑖 is the quantity of eligible order 𝑖 and the sum is over all eligible orders
+on the rationed side. Any residual unit due to rounding is assigned to the first
+eligible order.
+Example. Suppose the clearing price is 104.5 with volume 8. Eligible bids have
+quantities 3, 5, 2 (total = 10). Pro-rata fills: ⌊3 × 8/10⌋ = 2, ⌊5 × 8/10⌋ = 4,
+⌊2 × 8/10⌋ = 1, allocated = 7, residual = 1 given to the first order → fills = (3,
+4, 1).
+
+3 Infrastructure
+3.1 Docker Environment
+The project uses Docker Compose to run 3 MPC containers (party0, party1,
+party2) connected by a virtual network. Each container has MP-SPDZ pre-
+built with support for the following protocols:
+
+Protocol VM binary Security model Adversaries Main technique
+MASCOT mascot-party.x Malicious, dishonest ma- < 𝑛 OT-based pre-
+
+jority processing with
+authenticated triples
+
+Shamir shamir-party.x Semi-honest, honest ma- < 𝑛/2 Shamir secret shar-
+jority ing
+
+Semi semi-party.x Semi-honest, dishonest < 𝑛 OT-based prepro-
+majority cessing / triple
+
+generation
+replicated-ring-
+
+Replicated party.x Semi-honest, honest ma- 1 of 3 Replicated secret
+(ring) jority (3 parties) sharing mod 2𝑘
+
+The protocols in Table above cover both dishonest-majority and honest-majority
+backends available in MP-SPDZ. mascot-party.x implements MASCOT, a ma-
+liciously secure protocol for arithmetic MPC over a prime field in the dishonest-
+majority setting. Its main design goal is to keep the online phase efficient while
+generating authenticated Beaver triples in an OT-based preprocessing phase
+[1,2]. semi-party.x is the corresponding semi-honest OT-based variant; ac-
+cording to the MP-SPDZ documentation, it can be seen as MASCOT/SPDZ2k
+with the malicious-security machinery removed, leaving OT-based generation of
+additively shared Beaver triples [1].
+shamir-party.x is the honest-majority backend based on Shamir secret
+sharing. At a high level, a secret is encoded as evaluations of a low-degree
+polynomial, so any coalition below the reconstruction threshold learns nothing
+about the secret; this is the classical foundation of BGW-style honest-majority
+
+3
+
+
+
+MPC [1,3,4]. replicated-ring-party.x is the semi-honest three-party honest-
+majority backend over ℤ2𝑘 using replicated secret sharing. In MP-SPDZ, this
+implementation follows the optimized replicated-sharing approach associated
+with Araki et al., which is designed for very low communication and high
+throughput in the 3-party setting [1,5].
+
+3.2 Input Files
+Each party’s private orders are stored in a human-readable file inputs/party{id}.txt:
+# Party 0 — dark-auction orders
+# Each line: bid_price bid_qty ask_price ask_qty
+# A zero price means 'no order on that side'.
+
+# ￿￿ BTC orders ￿￿
+# bid_price bid_qty ask_price ask_qty
+
+0 0 103 2
+106 5 0 0
+85 1 101 2
+
+A conversion script (scripts/generate_inputs.py) translates these into
+the one-value-per-line format required by MP-SPDZ. Students may hand-
+edit the readable files and run python3 scripts/generate_inputs.py
+--convert-only to regenerate the MP-SPDZ input files.
+
+3.3 Compilation and Execution
+# Start the 3 containers
+docker compose up -d --build party0 party1 party2
+
+# Compile an MPC program (replace 'my-auction' with your program name)
+docker compose exec party0 bash -c \
+
+'cd /mp-spdz && python3 compile.py my-auction'
+
+# Run with MASCOT (one terminal per party, or use the provided scripts)
+docker compose exec party0 bash -c \
+
+'cd /mp-spdz && ./mascot-party.x -N 3 -p 0 -ip Config/IPs my-auction'
+Helper scripts are provided in scripts/ (see test_run.sh, run_auction.sh,
+benchmark.sh).
+
+4 Milestones
+Milestone 1 — Background Study and Setup (Week 2)
+Deliverable: short written report (max 1 pages).
+
+4
+
+
+
+1. Set up the Docker environment (docker compose up -d --build).
+Write a minimal “hello MPC” program (e.g., each party inputs a secret
+integer and the program prints the sum) and run it with the MASCOT
+protocol. Verify the output is correct.
+
+2. Study the MPC protocols listed in Section 3.1. For each, state:
+• The security model (semi-honest vs. malicious).
+• The trust assumption (honest majority vs. dishonest majority).
+• The main cryptographic building blocks (e.g., oblivious transfer, se-
+
+cret sharing, MACs).
+3. Study the MP-SPDZ type system: sint (secret integer), cint (clear field
+
+element), regint (machine register integer), and sfix (secret fixed-point).
+Understand the implications:
+
+• Why does sint / sint trigger an expensive fixed-point division?
+• Why is cint / cint a field inversion in GF(𝑝), not a floor division?
+• When should you use regint for integer arithmetic on revealed val-
+
+ues?
+4. Explain in your own words why a dark auction benefits from MPC. What
+
+would happen if a single trusted server ran the auction? What attacks
+become possible?
+
+Milestone 2 — Auction Design and Baseline Implementation (Week
+3)
+Deliverable: working .mpc program.
+
+1. Design the dark-auction algorithm using the description in Section 2.
+Your program must:
+
+• Read each party’s private orders using sint.get_input_from(party_id).
+• Support 3 assets (BTC, ETH, SOL) with N_ORDERS buy/sell orders
+
+per party per asset (start with N_ORDERS = 10).
+• Find the clearing price for each asset by scanning a discrete price
+
+ladder and computing 𝐷(𝑝) and 𝑆(𝑝) at each rung.
+• Handle the midpoint tie-break and pro-rata allocation as described
+
+in Sections 2.3 and 2.4.
+• Reveal only the final results (clearing price, volume, fills) — inter-
+
+mediate order data must remain secret.
+2. Implement the auction as a .mpc file. Pay particular attention to:
+
+• Avoiding expensive operations on secret types. Division of
+sint values triggers fixed-point arithmetic internally and is orders of
+magnitude slower than additions and comparisons. Think carefully
+about whether you can restructure the algorithm to avoid dividing
+secrets.
+
+• Correct use of types when converting from secret to public values
+for output (see Milestone 1, item 3).
+
+3. Verify correctness: construct a small test case (￿ 4 orders per side, 1
+asset) where you can compute the clearing price, volume and fills by hand.
+
+5
+
+
+
+Show that the program output matches.
+4. Report: describe your design decisions. In particular, explain what in-
+
+formation is revealed during the auction. Identify every .reveal() call
+and justify why it is necessary or could be avoided.
+
+Milestone 3 — Multi-Protocol Comparison (Week 4)
+Deliverable: measurement report.
+
+1. Run the same auction program (with the same inputs) under at
+least three of the four provided protocols (MASCOT, Shamir, Semi,
+Replicated-Ring).
+
+2. Measure for each protocol:
+• Wall-clock execution time.
+• Total data sent (bytes) — reported by MP-SPDZ at the end of each
+
+run.
+• Number of rounds — from the compiler output.
+
+3. Analyse and explain the differences. In particular:
+• Why is MASCOT slower than Semi, even though both tolerate dis-
+
+honest majority?
+• Why does Shamir typically communicate less than MASCOT?
+• What is the practical trade-off between security guarantees and per-
+
+formance?
+4. Discuss which protocol you would choose for a real-world financial dark
+
+pool, and why.
+
+Milestone 4 — Performance Optimisation (Week 5) [Optional]
+Deliverable: optimised .mpc program(s).
+Implement at least two optimisations to your baseline implementation (or
+propose your own). Some ideas:
+
+Optimisation Idea
+Prefix-sum demand/supply Instead of recomputing 𝐷(𝑝) and
+
+𝑆(𝑝) independently at every rung,
+obliviously sort orders by price and
+compute running totals with a single
+pass (prefix sums). This reduces the
+work from 𝑂(𝑅 × 𝑁) to
+𝑂(𝑁 log2 𝑁 + 𝑅).
+
+6
+
+
+
+Optimisation Idea
+Efficient sorting network If your baseline uses a simple 𝑂(𝑛2)
+
+comparator-swap loop, replace it with
+Batcher’s odd-even merge sort —
+𝑂(𝑛 log2 𝑛) comparators, 𝑂(log2 𝑛)
+depth — which can significantly
+reduce the number of secret
+comparisons.
+
+SIMD vectorisation Pack all assets into SIMD vectors so
+that one instruction processes all
+auctions in parallel. MP-SPDZ
+supports sint.Array and vectorised
+operations.
+
+Reducing reveals Delay or eliminate intermediate
+.reveal() calls to reduce leakage
+and/or communication rounds.
+
+Custom idea Any other justified optimisation (e.g.,
+batch OT amortisation, alternative
+price-finding strategies).
+
+For each optimisation: 1. Explain the algorithmic change. 2. Show the compiler
+statistics (triples, rounds, opens) before and after. 3. Measure wall-clock time
+improvement under at least one protocol.
+
+Milestone 5 — Final Report and Demo (Week 6)
+Deliverable: PowerPoint Presentation (20 min) + live demo.
+The presentation should consolidate Milestones 1–4 and include:
+
+1. Architecture overview: describe the system (Docker topology, MPC
+framework, input workflow).
+
+2. Auction algorithm: formal description of the clearing-price computa-
+tion, correctness argument, pro-rata allocation.
+
+3. Security analysis: what does each party learn? What would a malicious
+party need to do to manipulate the result? How do the different protocols
+defend against this?
+
+4. Performance results: tables comparing protocols and optimisation vari-
+ants. Include at least: triples, rounds, communication (bytes), wall-clock
+time.
+
+5. Discussion: lessons learned, limitations, and possible extensions (e.g.,
+more parties, cross-asset hedging, real-world deployment considerations).
+
+The live demo should: - Show the human-readable input files. - Compile and
+run the auction with at least two different protocols. - Demonstrate that the
+output is correct and that intermediate values are not leaked.
+
+7
+
+
+
+6 Provided Files
+Files available at https://github.com/ribeirocn/mpc-project
+
+File Description
+Dockerfile Container build with MP-SPDZ and
+
+supported protocols.
+docker-compose.yml 3-party Docker Compose setup.
+Config/IPs Party IP addresses for the Docker network.
+inputs/party{0,1,2}.txt Human-readable input files (editable). See
+
+Section 3.2.
+Inputs/Input-P{0,1,2}-0 MP-SPDZ input files (auto-generated from
+
+the above).
+scripts/generate_inputs.py Input generator: creates readable +
+
+MP-SPDZ input files. Use --convert-only
+to regenerate MP-SPDZ files after
+hand-editing.
+
+scripts/test_run.sh Quick single-protocol test runner with
+per-party output.
+
+scripts/run_auction.sh Multi-protocol runner (compile + run).
+scripts/benchmark.sh Automated benchmarking across programs
+
+and protocols.
+PROJECT-STATEMENT.pdf This file.
+
+Note: No .mpc program files are provided. You must write the auction program
+yourself.
+
+7 Rules and Submission
+• Groups of 3 students.
+• All code must be original. You may consult the MP-SPDZ documentation,
+
+academic papers, and course materials, but must cite any external sources.
+• Each milestone is evaluated in the class of the corresponding week.
+• The final demo is scheduled during the last week of the project. All group
+
+members must be present and able to answer questions about any part of
+the project.
+
+8
+
+
+
+References
+[1] MP-SPDZ documentation and protocol mapping. Available at: https://mp-
+spdz.readthedocs.io/_/downloads/en/latest/pdf/
+[2] Keller, Orsini, and Scholl. MASCOT: Faster Malicious Arithmetic Secure
+Computation with Oblivious Transfer. CCS 2016. Available at: https://doi.or
+g/10.1145/2976749.2978357
+[3] Shamir. How to Share a Secret. CACM, 1979. Available at: https://cacm.a
+cm.org/research/how-to-share-a-secret/
+[4] Ben-Or, Goldwasser, and Wigderson. Completeness Theorems for Non-
+Cryptographic Fault-Tolerant Distributed Computation. STOC 1988. Available
+at: https://doi.org/10.1145/62212.62213
+[5] Araki et al. High-Throughput Semi-Honest Secure Three-Party Computation
+with an Honest Majority. CCS 2016. Available at: https://doi.org/10.1145/29
+76749.2978331
+
+Good luck — and may your clearing prices be fair.
+
+9
