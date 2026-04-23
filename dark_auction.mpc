@@ -1,0 +1,167 @@
+# Dark auction prototype (Milestone 2 skeleton)
+# This is a small, self-contained skeleton to start Milestone 2.
+# It reads a small set of integers from each party and performs a placeholder
+# aggregation. Replace placeholder logic with full matching + pro-rata later.
+
+# Number of parties (fixed for this course)
+nparties = 3
+
+# Configuration (match generator defaults)
+N_ASSETS = 3
+N_ORDERS = None  # autodetected from Inputs files at compile-time
+
+# Read inputs as secrets during runtime and only reveal aggregates needed
+from Compiler.types import sint
+
+# Determine N_ORDERS and public prices from Inputs files (compile-time)
+public_bprice = [[[] for _ in range(N_ASSETS)] for _ in range(nparties)]
+public_aprice = [[[] for _ in range(N_ASSETS)] for _ in range(nparties)]
+for pid in range(nparties):
+	path = f"Inputs/Input-P{pid}-0"
+	with open(path) as f:
+		tokens = [line.strip() for line in f if line.strip()]
+		nums = [int(x) if '.' not in x else int(float(x)) for x in tokens]
+		calculated = len(nums) // (N_ASSETS * 4)
+		if N_ORDERS is None:
+			N_ORDERS = calculated
+		elif N_ORDERS != calculated:
+			raise ValueError(f"Inconsistent N_ORDERS: expected {N_ORDERS}, got {calculated} in {path}")
+		idx = 0
+		for a in range(N_ASSETS):
+			for o in range(N_ORDERS):
+				bp = nums[idx]; bq = nums[idx+1]; ap = nums[idx+2]; aq = nums[idx+3]
+				public_bprice[pid][a].append(bp)
+				public_aprice[pid][a].append(ap)
+				idx += 4
+
+# Runtime: read secret quantities
+secret_bq = [[[sint(0) for _ in range(N_ORDERS)] for _ in range(N_ASSETS)] for _ in range(nparties)]
+secret_aq = [[[sint(0) for _ in range(N_ORDERS)] for _ in range(N_ASSETS)] for _ in range(nparties)]
+for pid in range(nparties):
+	for a in range(N_ASSETS):
+		for o in range(N_ORDERS):
+			_bp = sint.get_input_from(pid)
+			bq = sint.get_input_from(pid)
+			_ap = sint.get_input_from(pid)
+			aq = sint.get_input_from(pid)
+			secret_bq[pid][a][o] = bq
+			secret_aq[pid][a][o] = aq
+
+# Process each asset: compute secret sums D(p), S(p), reveal them, select clearing price
+for asset in range(N_ASSETS):
+	prices = sorted(set([p for pid in range(nparties) for p in public_bprice[pid][asset] if p>0] + \
+						[p for pid in range(nparties) for p in public_aprice[pid][asset] if p>0]))
+	if not prices:
+		print_ln("Asset %s: no orders", asset)
+		continue
+
+	# For each price compute secret D(p), S(p) and their revealed regint values
+	D_regs = []
+	S_regs = []
+	V_regs = []
+	for p in prices:
+		D = sint(0)
+		S = sint(0)
+		for pid in range(nparties):
+			for o in range(N_ORDERS):
+				if public_bprice[pid][asset][o] >= p:
+					D = D + secret_bq[pid][asset][o]
+				if public_aprice[pid][asset][o] > 0 and public_aprice[pid][asset][o] <= p:
+					S = S + secret_aq[pid][asset][o]
+		D_pub = D.reveal()
+		S_pub = S.reveal()
+		D_regs.append(D_pub)
+		S_regs.append(S_pub)
+		# V_reg is the revealed minimal of D and S (regint)
+		V_reg = D_pub * (D_pub < S_pub) + S_pub * (1 - (D_pub < S_pub))
+		V_regs.append(V_reg)
+
+	# select best V (regint) and compute p_low/p_high among prices achieving best V
+	best_V = V_regs[0]
+	for i in range(1, len(V_regs)):
+		v = V_regs[i]
+		gt = v > best_V
+		best_V = gt * v + (1 - gt) * best_V
+
+	# Compute mask per price for being best
+	masks = [ (V_regs[i] == best_V) for i in range(len(prices)) ]
+
+	BIG = max(prices) + 1
+	# compute p_low: minimum price among those with mask==1
+	cur_min = masks[0] * prices[0] + (1 - masks[0]) * BIG
+	for i in range(1, len(prices)):
+		cand = masks[i] * prices[i] + (1 - masks[i]) * BIG
+		is_smaller = cand < cur_min
+		cur_min = is_smaller * cand + (1 - is_smaller) * cur_min
+	p_low = cur_min
+
+	# compute p_high: maximum price among those with mask==1
+	NEG_BIG = min(prices) - 1
+	cur_max = masks[0] * prices[0] + (1 - masks[0]) * NEG_BIG
+	for i in range(1, len(prices)):
+		cand = masks[i] * prices[i] + (1 - masks[i]) * NEG_BIG
+		is_bigger = cand > cur_max
+		cur_max = is_bigger * cand + (1 - is_bigger) * cur_max
+	p_high = cur_max
+
+	sum_ph = p_low + p_high
+	V_star = best_V
+
+	# Extract D_star and S_star corresponding to p_low
+	D_star = sint(0)
+	S_star = sint(0)
+	for i,p in enumerate(prices):
+		eq = (p == p_low)
+		D_star = D_star + eq * D_regs[i]
+		S_star = S_star + eq * S_regs[i]
+
+	# Determine rationed side (regint masks) and build unified entry list
+	rationed_buy = (D_star > S_star)
+	rationed_sell = 1 - rationed_buy
+	total_pool = rationed_buy * D_star + rationed_sell * S_star
+
+	entries = [(pid,o) for pid in range(nparties) for o in range(N_ORDERS)]
+	M = len(entries)
+	includes = [None] * M
+	for idx,(pid,o) in enumerate(entries):
+		include_buy = (public_bprice[pid][asset][o] >= p_low)
+		include_sell = (public_aprice[pid][asset][o] <= p_low) * (1 if public_aprice[pid][asset][o] > 0 else 0)
+		includes[idx] = rationed_buy * include_buy + rationed_sell * include_sell
+
+	# Pro-rata allocation across all entries using include masks
+	alloc = {}
+	shares_pub = [None] * M
+	assigned = 0
+	for idx,(pid,o) in enumerate(entries):
+		inc = includes[idx]
+		# choose q based on rationed side without Python branching
+		q_buy = secret_bq[pid][asset][o]
+		q_sell = secret_aq[pid][asset][o]
+		q = rationed_buy * q_buy + rationed_sell * q_sell
+		prod = q * V_star
+		denom = total_pool + (total_pool == 0)
+		mask_nonzero = (total_pool != 0)
+		share = (prod // denom) * mask_nonzero
+		share_pub = share.reveal()
+		shares_pub[idx] = inc * share_pub
+		assigned = assigned + shares_pub[idx]
+
+	leftover = V_star - assigned
+	# compute prefix ranks among included entries and distribute leftover to first `leftover`
+	prefix = 0
+	for idx,(pid,o) in enumerate(entries):
+		inc = includes[idx]
+		rank = prefix
+		add_one = inc * (rank < leftover)
+		final_share = shares_pub[idx] + add_one
+		alloc[(pid,o)] = final_share
+		prefix = prefix + inc
+
+	# Aggregate fills per party and reveal
+	fills = {pid: 0 for pid in range(nparties)}
+	for (pid,o),v in alloc.items():
+		fills[pid] = fills.get(pid, 0) + v
+
+	print_ln("Asset %s: price_low=%s price_high=%s traded=%s rationed=%s", asset, p_low, p_high, V_star, rationed)
+	for pid in range(nparties):
+		print_ln("  Party %s fill=%s", pid, fills[pid])
