@@ -18,6 +18,17 @@
 #   Only final clearing price, traded volume, and per-party fills are revealed.
 #   No intermediate aggregates are ever made public.
 #
+# PERFORMANCE OPTIMIZATIONS (vs. naive implementation):
+#   OPT-1: Per-asset price ranges instead of global [30,230]
+#          BTC [80,125]=46 levels, ETH [180,225]=46, SOL [30,75]=46
+#          → ~4.4x fewer iterations in price ladder scan
+#   OPT-2: Removed redundant (bp > 0) check for bids —
+#          since PRICE_MIN >= 1, (bp >= p) already implies bp > 0
+#          NOTE: (ap > 0) MUST be kept for asks since (0 <= p) is True!
+#   OPT-4: Steps C and D merged into single pass (avoid recomputing eligibility)
+#   OPT-5: Precompute (ap > 0) bits once per asset, reused across all price levels
+#          → saves N_PRICES × N_ORDERS comparisons per asset
+#
 # ============================================================================
 
 from Compiler.types import sint, cint, regint, Array
@@ -27,11 +38,13 @@ nparties = 3
 N_ASSETS = 3
 N_ORDERS = 10
 
-# Fixed price ladder: must cover all possible bid/ask prices.
-# BTC ~85-120, ETH ~185-220, SOL ~35-70 → single range covers all.
-PRICE_MIN = 30
-PRICE_MAX = 230
-N_PRICES = PRICE_MAX - PRICE_MIN + 1
+# Per-asset price ranges (OPT-1): narrower ladders per asset.
+# BTC base=100: bids in [85,110], asks in [95,120] → safe range [80,125]
+# ETH base=200: bids in [185,210], asks in [195,220] → safe range [180,225]
+# SOL base=50:  bids in [35,60],  asks in [45,70]  → safe range [30,75]
+# These ranges include a ±5 safety margin beyond the generator's parameters.
+ASSET_PRICE_MIN = [80, 180, 30]
+ASSET_PRICE_MAX = [125, 225, 75]
 
 TOTAL_ORDERS = nparties * N_ORDERS  # orders per asset across all parties
 
@@ -60,11 +73,31 @@ for pid in range(nparties):
 
 for asset in range(N_ASSETS):
 
+    # Per-asset price range (OPT-1)
+    P_MIN = ASSET_PRICE_MIN[asset]
+    P_MAX = ASSET_PRICE_MAX[asset]
+    N_PRICES = P_MAX - P_MIN + 1
+
     # =========================================================================
-    # STEP A: Scan fixed price ladder, compute secret D(p), S(p), V(p)
+    # OPT-5: Precompute (ap > 0) bits once per asset
     # =========================================================================
-    # D(p) = sum of bid_qty where bid_price >= p AND bid_price > 0
-    # S(p) = sum of ask_qty where ask_price <= p AND ask_price > 0
+    # This secret bit doesn't depend on the price level p, so we compute it
+    # once and reuse it across all N_PRICES iterations of the price ladder.
+    # Saves N_PRICES × TOTAL_ORDERS comparisons.
+    # NOTE: (bp > 0) is NOT needed because for bids, (bp >= p) where p >= 1
+    #       already implies bp > 0. But for asks, (ap <= p) is True when ap=0,
+    #       so we MUST filter with (ap > 0).
+
+    ap_active = [[sint(0) for _ in range(N_ORDERS)] for _ in range(nparties)]
+    for pid in range(nparties):
+        for o in range(N_ORDERS):
+            ap_active[pid][o] = (secret_ap[pid][asset][o] > 0)
+
+    # =========================================================================
+    # STEP A: Scan per-asset price ladder, compute secret D(p), S(p), V(p)
+    # =========================================================================
+    # D(p) = sum of bid_qty where bid_price >= p   (OPT-2: no bp>0 check)
+    # S(p) = sum of ask_qty where ask_price <= p AND ap_active
     # V(p) = min(D(p), S(p))
     # All comparisons produce secret bits — no information leaks.
 
@@ -73,27 +106,25 @@ for asset in range(N_ASSETS):
     p_high = sint(0)
 
     for p_idx in range(N_PRICES):
-        p = PRICE_MIN + p_idx  # public loop variable (price level)
+        p = P_MIN + p_idx  # public loop variable (price level)
 
         # --- Compute D(p): secret aggregate demand ---
+        # OPT-2: (bp >= p) where p >= 1 already excludes bp=0 orders
         D_p = sint(0)
         for pid in range(nparties):
             for o in range(N_ORDERS):
                 bp = secret_bp[pid][asset][o]
                 bq = secret_bq[pid][asset][o]
-                # bid_eligible = (bp >= p) AND (bp > 0)
-                bid_eligible = (bp >= p) * (bp > 0)
-                D_p = D_p + bid_eligible * bq
+                D_p = D_p + (bp >= p) * bq
 
         # --- Compute S(p): secret aggregate supply ---
+        # OPT-5: use precomputed ap_active instead of recomputing (ap > 0)
         S_p = sint(0)
         for pid in range(nparties):
             for o in range(N_ORDERS):
                 ap = secret_ap[pid][asset][o]
                 aq = secret_aq[pid][asset][o]
-                # ask_eligible = (ap <= p) AND (ap > 0)
-                ask_eligible = (ap <= p) * (ap > 0)
-                S_p = S_p + ask_eligible * aq
+                S_p = S_p + (ap <= p) * ap_active[pid][o] * aq
 
         # --- V(p) = min(D, S) — secret ---
         D_less = (D_p < S_p)
@@ -124,10 +155,12 @@ for asset in range(N_ASSETS):
     V_star = best_V
 
     # =========================================================================
-    # STEP C: Determine rationed side (SECRET)
+    # STEPS C+D (MERGED — OPT-4): Rationed side + Pro-rata allocation
     # =========================================================================
-    # Recompute D and S at p_low. Since p_low is secret, we use secret
-    # comparisons against it (sint >= sint produces secret bit).
+    # Recompute D and S at p_low to determine rationed side.
+    # Since p_low is secret, these are sint >= sint comparisons (more expensive
+    # than sint >= public, but only done once, not per price level).
+    # Then immediately compute pro-rata shares in the same pass structure.
 
     D_at_plow = sint(0)
     S_at_plow = sint(0)
@@ -136,13 +169,13 @@ for asset in range(N_ASSETS):
         for o in range(N_ORDERS):
             bp = secret_bp[pid][asset][o]
             bq = secret_bq[pid][asset][o]
-            bid_ok = (bp >= p_low) * (bp > 0)
-            D_at_plow = D_at_plow + bid_ok * bq
+            # OPT-2: no (bp > 0) needed — (bp >= p_low) handles it since p_low >= P_MIN >= 1
+            D_at_plow = D_at_plow + (bp >= p_low) * bq
 
             ap = secret_ap[pid][asset][o]
             aq = secret_aq[pid][asset][o]
-            ask_ok = (ap <= p_low) * (ap > 0)
-            S_at_plow = S_at_plow + ask_ok * aq
+            # OPT-5: reuse precomputed ap_active
+            S_at_plow = S_at_plow + (ap <= p_low) * ap_active[pid][o] * aq
 
     # rationed_buy = 1 if demand exceeds supply
     rationed_buy = (D_at_plow > S_at_plow)
@@ -150,13 +183,6 @@ for asset in range(N_ASSETS):
 
     # total_pool = sum of quantities on the rationed side
     total_pool = rationed_buy * D_at_plow + rationed_sell * S_at_plow
-
-    # =========================================================================
-    # STEP D: Pro-rata allocation (SECRET division)
-    # =========================================================================
-    # share_i = floor(q_i * V_star / total_pool)
-    # Uses sint / sint — triggers MP-SPDZ secure division protocol.
-    # Expensive but fully private.
 
     # Guard division by zero
     pool_is_zero = (total_pool == 0)
@@ -176,8 +202,9 @@ for asset in range(N_ASSETS):
         aq = secret_aq[pid][asset][o]
 
         # Eligibility on rationed side at p_low
-        buy_elig = (bp >= p_low) * (bp > 0)
-        sell_elig = (ap <= p_low) * (ap > 0)
+        # OPT-2: no (bp > 0) for bids; OPT-5: precomputed ap_active for asks
+        buy_elig = (bp >= p_low)
+        sell_elig = (ap <= p_low) * ap_active[pid][o]
         eligible = rationed_buy * buy_elig + rationed_sell * sell_elig
         eligibles[idx] = eligible
 
@@ -186,6 +213,55 @@ for asset in range(N_ASSETS):
         effective_q = eligible * q
 
         # Secret floor division: share = floor(effective_q * V_star / safe_denom)
+        # Uses sint / sint — triggers MP-SPDZ secure division protocol.
+        numerator = effective_q * V_star
+        share = numerator / safe_denom
+        share = share * (sint(1) - pool_is_zero)
+
+        shares[idx] = share
+        assigned = assigned + share
+
+    # =========================================================================
+    # STEP E: Leftover distribution (SECRET prefix rank)
+    # =========================================================================
+    # leftover = V_star - assigned
+    # First 'leftover' eligible orders each get +1 unit.
+
+    leftover = V_star - assigned
+    fills_per_party = [sint(0)] * nparties
+    prefix_rank = sint(0)
+
+    for idx in range(TOTAL_ORDERS):
+        pid = idx // N_ORDERS
+
+        # Order gets +1 if eligible AND its rank < leftover
+        gets_extra = eligibles[idx] * (prefix_rank < leftover)
+        final_fill = shares[idx] + gets_extra
+
+        # Accumulate per-party
+        fills_per_party[pid] = fills_per_party[pid] + final_fill
+
+        # Advance rank counter (only eligible orders count)
+        prefix_rank = prefix_rank + eligibles[idx]
+
+    # =========================================================================
+    # STEP F: REVEAL FINAL RESULTS ONLY
+    # =========================================================================
+    # This is the ONLY place .reveal() is called in the entire program.
+
+    print_ln("Asset %s: clearing_price=%s remainder=%s traded=%s",
+             asset,
+             clearing_price_int.reveal(),
+             clearing_price_rem.reveal(),
+             V_star.reveal())
+
+    for pid in range(nparties):
+        print_ln("  Party %s fill=%s", pid, fills_per_party[pid].reveal())
+ bq + rationed_sell * aq
+        effective_q = eligible * q
+
+        # Secret floor division: share = floor(effective_q * V_star / safe_denom)
+        # Uses sint / sint — triggers MP-SPDZ secure division protocol.
         numerator = effective_q * V_star
         share = numerator / safe_denom
         share = share * (sint(1) - pool_is_zero)

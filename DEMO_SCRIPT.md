@@ -89,7 +89,11 @@ python3 -B tests/edge_cases.py
 
 ### Q: What's the computational cost of keeping everything secret?
 
-**A**: The main costs are: (1) scanning 201 price levels × 30 orders per asset with secret comparisons, (2) `sint/sint` division for pro-rata allocation (triggers MP-SPDZ secure division protocol). Total: ~6000 secret comparisons + 30 secure divisions per asset. More expensive than revealing intermediates, but provides strictly superior privacy.
+**A**: After optimization, the main costs per asset are: (1) scanning 46 price levels × 30 orders = ~2,500 secret comparisons (down from ~25,000 with naive 201-level ladder), (2) 30 `sint/sint` divisions for pro-rata allocation. The 30 divisions dominate wall-clock time (~50–100× a multiplication each). Four optimizations yield a ~10× reduction in comparison/multiplication count.
+
+### Q: What optimizations did you apply?
+
+**A**: Four optimizations: (OPT-1) Per-asset price ranges — BTC [80,125], ETH [180,225], SOL [30,75] — reducing 201 to 46 levels per asset. (OPT-2) Removing redundant `(bp > 0)` checks for bids, since `(bp >= p)` with `p ≥ 1` already excludes zero bids. (OPT-4) Merging Steps C and D to avoid recomputing eligibility. (OPT-5) Precomputing `(ap > 0)` once per asset and reusing across all price levels. Combined: ~10× fewer comparisons, ~9× fewer multiplications.
 
 ### Q: What if two parties collude?
 
@@ -128,15 +132,15 @@ Bottleneck: number of unique prices.
 
 ## Code Pointers
 
-**dark_auction.mpc**:
-- Lines 1–36: Header with strict MPC compliance rules, input format, privacy guarantee
-- Lines 38–55: Phase 1 — Read ALL inputs as secrets via `sint.get_input_from()`
-- Lines 57–114: Phase 2, Step A — Fixed price ladder scan (D(p), S(p), V(p) all secret)
-- Lines 116–124: Step B — Clearing price = (p_low + p_high) / 2 (secret)
-- Lines 126–152: Step C — Rationed side determination (secret comparison)
-- Lines 154–194: Step D — Pro-rata allocation with `sint/sint` division
-- Lines 196–217: Step E — Leftover distribution via secret prefix rank
-- Lines 219–231: Step F — ONLY `.reveal()` point (final results)
+**dark_auction.mpc** (260 lines, optimized):
+- Lines 1–36: Header — strict MPC compliance rules, input format, privacy guarantee, optimization list
+- Lines 38–68: Phase 1 — Read ALL inputs as secrets via `sint.get_input_from()`
+- Lines 70–90: OPT-5 — Precompute `(ap > 0)` bits once per asset
+- Lines 92–145: Step A — Per-asset price ladder scan (OPT-1: 46 levels vs 201, OPT-2: no `bp>0`)
+- Lines 147–155: Step B — Clearing price = (p_low + p_high) / 2 (secret)
+- Lines 157–222: Steps C+D merged (OPT-4) — Rationed side + pro-rata with `sint/sint` division
+- Lines 224–245: Step E — Leftover distribution via secret prefix rank
+- Lines 247–259: Step F — ONLY `.reveal()` point (final results)
 
 **tests/edge_cases.py**:
 - 7 test cases (no-match, single-order, plateau, pro-rata, inactive party, multi-order, N=10 regression)

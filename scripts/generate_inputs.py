@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Generate dark-auction input files — human-readable AND MP-SPDZ format.
+Generate dark-auction input files - human-readable AND MP-SPDZ format.
 
 Two outputs per party:
 
   inputs/party{pid}.txt     Human-readable: 4 values per line, #-comments.
   Inputs/Input-P{pid}-0     MP-SPDZ format: one integer per line.
 
-The readable file can be hand-edited — run this script with --convert-only
+The readable file can be hand-edited - run this script with --convert-only
 to re-generate MP-SPDZ files from edited readable files.
 
 Usage examples:
@@ -32,9 +32,7 @@ READABLE_DIR = "inputs"
 MPSPDZ_DIR   = "Inputs"
 
 
-# ── Generation ───────────────────────────────────────────────────────────
-
-def generate_readable(n_orders: int, use_sfix: bool, seed: int):
+def generate_readable(n_orders, use_sfix, seed):
     """Generate human-readable input files in inputs/party{pid}.txt."""
     rng = random.Random(seed)
     os.makedirs(READABLE_DIR, exist_ok=True)
@@ -42,14 +40,14 @@ def generate_readable(n_orders: int, use_sfix: bool, seed: int):
     for pid in range(N_PARTIES):
         path = os.path.join(READABLE_DIR, f"party{pid}.txt")
         with open(path, "w", encoding="utf-8") as f:
-            f.write(f"# Party {pid} — dark-auction orders\n")
+            f.write(f"# Party {pid} - dark-auction orders\n")
             f.write(f"# Each line: bid_price  bid_qty  ask_price  ask_qty\n")
             f.write(f"# A zero price means 'no order on that side'.\n")
             f.write(f"#\n")
 
             for asset in ASSET_NAMES:
                 base = BASE_PRICES[asset]
-                f.write(f"\n# ── {asset} orders ──\n")
+                f.write(f"\n# -- {asset} orders --\n")
                 f.write(f"# bid_price  bid_qty  ask_price  ask_qty\n")
 
                 for k in range(n_orders):
@@ -78,13 +76,8 @@ def generate_readable(n_orders: int, use_sfix: bool, seed: int):
         print(f"  Wrote {path}")
 
 
-# ── Conversion ───────────────────────────────────────────────────────────
-
-def parse_readable(pid: int, use_sfix: bool):
-    """
-    Parse a human-readable input file and return a flat list of values
-    in MP-SPDZ reading order:  for each asset, for each order: bp bq ap aq.
-    """
+def parse_readable(pid, use_sfix):
+    """Parse a human-readable input file and return a flat list of values."""
     path = os.path.join(READABLE_DIR, f"party{pid}.txt")
     values = []
     with open(path, encoding="utf-8") as f:
@@ -104,8 +97,8 @@ def parse_readable(pid: int, use_sfix: bool):
     return values
 
 
-def convert_to_mpspdz(use_sfix: bool):
-    """Read inputs/party{pid}.txt → write Inputs/Input-P{pid}-0."""
+def convert_to_mpspdz(use_sfix):
+    """Read inputs/party{pid}.txt -> write Inputs/Input-P{pid}-0."""
     os.makedirs(MPSPDZ_DIR, exist_ok=True)
     for pid in range(N_PARTIES):
         values = parse_readable(pid, use_sfix)
@@ -118,12 +111,50 @@ def convert_to_mpspdz(use_sfix: bool):
                     f.write(f"{int(v)}\n")
         n_orders = len(values) // (len(ASSET_NAMES) * 4)
         print(f"  Wrote {path}  ({len(values)} values, "
-              f"{len(ASSET_NAMES)} assets × {n_orders} orders × 4)")
+              f"{len(ASSET_NAMES)} assets x {n_orders} orders x 4)")
 
 
-# ── Summary ──────────────────────────────────────────────────────────────
+def generate_mpspdz_direct(n_orders, seed):
+    """Generate MP-SPDZ input files directly (bypasses readable files).
 
-def print_summary(use_sfix: bool):
+    Use this when the readable files cannot be overwritten (e.g., read-only
+    mount) or when you want to ensure the MP-SPDZ inputs match the requested
+    n_orders exactly.
+    """
+    rng = random.Random(seed)
+    os.makedirs(MPSPDZ_DIR, exist_ok=True)
+
+    for pid in range(N_PARTIES):
+        values = []
+        for asset in ASSET_NAMES:
+            base = BASE_PRICES[asset]
+            for k in range(n_orders):
+                has_bid = rng.random() < 0.6
+                has_ask = rng.random() < 0.6
+
+                if has_bid:
+                    bp = base + rng.randint(-15, 10)
+                    bq = rng.randint(1, 5)
+                else:
+                    bp, bq = 0, 0
+
+                if has_ask:
+                    ap = base + rng.randint(-5, 20)
+                    aq = rng.randint(1, 5)
+                else:
+                    ap, aq = 0, 0
+
+                values.extend([bp, bq, ap, aq])
+
+        path = os.path.join(MPSPDZ_DIR, f"Input-P{pid}-0")
+        with open(path, "w", encoding="utf-8") as f:
+            for v in values:
+                f.write(f"{int(v)}\n")
+        print(f"  Wrote {path}  ({len(values)} values, "
+              f"{len(ASSET_NAMES)} assets x {n_orders} orders x 4)")
+
+
+def print_summary(use_sfix):
     """Print a human-readable summary of all party inputs."""
     for pid in range(N_PARTIES):
         values = parse_readable(pid, use_sfix)
@@ -135,12 +166,10 @@ def print_summary(use_sfix: bool):
             for k in range(n_orders):
                 bp, bq, ap, aq = values[idx:idx + 4]
                 idx += 4
-                bid_str = f"bid({bp}×{bq})" if bp else "no bid"
-                ask_str = f"ask({ap}×{aq})" if ap else "no ask"
+                bid_str = f"bid({bp}x{bq})" if bp else "no bid"
+                ask_str = f"ask({ap}x{aq})" if ap else "no ask"
                 print(f"      order {k:2d}: {bid_str:20s}  {ask_str}")
 
-
-# ── Main ─────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
@@ -170,12 +199,20 @@ def main():
     else:
         print(f"Generating inputs: n_orders={args.n_orders}, "
               f"sfix={args.sfix}, seed={args.seed}")
-        generate_readable(args.n_orders, args.sfix, args.seed)
-        print("\nConverting -> MP-SPDZ format:")
-        convert_to_mpspdz(args.sfix)
+        try:
+            generate_readable(args.n_orders, args.sfix, args.seed)
+            print("\nConverting -> MP-SPDZ format:")
+            convert_to_mpspdz(args.sfix)
+        except (PermissionError, OSError) as e:
+            print(f"\n  Warning: could not write readable files ({e})")
+            print("  Generating MP-SPDZ inputs directly...")
+            generate_mpspdz_direct(args.n_orders, args.seed)
 
     if args.summary or not args.convert_only:
-        print_summary(args.sfix)
+        try:
+            print_summary(args.sfix)
+        except (FileNotFoundError, ValueError):
+            print("  (Summary skipped - readable files not available)")
 
 
 if __name__ == "__main__":

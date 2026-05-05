@@ -41,23 +41,23 @@ def parse_sim_output(txt):
 
 
 def parse_mpc_output(txt):
-    # MPC prints price_low / price_high; compute clearing_price as midpoint string
+    # New format: Asset 0: clearing_price=104 remainder=1 traded=15
+    # remainder=1 means .5 (midpoint between odd sum of p_low+p_high)
     res = {}
     lines = [l.rstrip() for l in txt.splitlines() if l.strip()]
     asset = None
     for line in lines:
         if line.startswith('Asset'):
-            # Example: Asset 0: price_low=103 price_high=106 traded=15 rationed_buy=1
-            m = re.match(r"Asset\s+(\d+):.*price_low=(\d+)\s+price_high=(\d+)\s+traded=(\d+)", line)
+            # Match new output format from refactored dark_auction.mpc
+            m = re.match(r"Asset\s+(\d+):\s*clearing_price=(\d+)\s+remainder=(\d+)\s+traded=(\d+)", line)
             asset = None
             if m:
                 asset = int(m.group(1))
-                p_low = int(m.group(2)); p_high = int(m.group(3)); traded = int(m.group(4))
-                s = p_low + p_high
-                if s % 2 == 0:
-                    cp = str(s//2)
+                cp_int = int(m.group(2)); remainder = int(m.group(3)); traded = int(m.group(4))
+                if remainder:
+                    cp = f"{cp_int}.5"
                 else:
-                    cp = f"{s//2}.5"
+                    cp = str(cp_int)
                 res[asset] = {'clearing_price': cp, 'traded': traded, 'fills': {}}
         elif line.strip().startswith('Party') and asset is not None:
             m = re.match(r"Party\s+(\d+)\s+fill=(\d+)", line.strip())
@@ -72,6 +72,8 @@ def main():
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--n-orders', type=int, default=10)
     p.add_argument('--assets', type=int, default=3)
+    p.add_argument('--mpc-timeout', type=int, default=180,
+                        help='Timeout in seconds for each MPC party run (default: 180)')
     args = p.parse_args()
 
     print(f"Generating inputs (seed={args.seed}, n_orders={args.n_orders})...")
@@ -89,6 +91,12 @@ def main():
     print(sim.stdout)
     sim_res = parse_sim_output(sim.stdout)
 
+    # Kill any stale mascot-party.x processes from previous runs
+    print("Cleaning up stale MPC processes...")
+    for pid in range(3):
+        run(f'docker compose exec -T party{pid} bash -c "pkill -f mascot-party.x || true"')
+    import time; time.sleep(2)
+
     print("Running MPC parties (docker compose exec)...")
     cmds = []
     for pid in range(3):
@@ -98,7 +106,7 @@ def main():
     procs = [subprocess.Popen(c, shell=True, cwd=str(repo), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) for c in cmds]
     outs = []
     for pproc in procs:
-        out_text, _ = pproc.communicate(timeout=180)
+        out_text, _ = pproc.communicate(timeout=args.mpc_timeout)
         outs.append(out_text)
     combined = '\n'.join(outs)
     print('--- MPC combined output ---')
