@@ -1,168 +1,231 @@
-# Dark auction prototype (Milestone 2 skeleton)
-# This is a small, self-contained skeleton to start Milestone 2.
-# It reads a small set of integers from each party and performs a placeholder
-# aggregation. Replace placeholder logic with full matching + pro-rata later.
+# ============================================================================
+# dark_auction.mpc — Secure Dark Auction (Milestone 2)
+# ============================================================================
+#
+# STRICT MPC COMPLIANCE:
+#   1. NO open() — all data read via sint.get_input_from() at runtime
+#   2. Fixed discrete price ladder (no dynamic sorted/set on secrets)
+#   3. NO intermediate .reveal() — only final results revealed
+#   4. Correct midpoint tie-break: clearing_price = (p_low + p_high) / 2
+#   5. Pro-rata allocation entirely in secret arithmetic
+#
+# INPUT FORMAT (per party, sequential in Input-P{id}-0):
+#   For each asset (0..2): For each order (0..N_ORDERS-1):
+#     bid_price  bid_qty  ask_price  ask_qty   (4 integers)
+#
+# PRIVACY GUARANTEE:
+#   All order data (prices AND quantities) remain secret (sint).
+#   Only final clearing price, traded volume, and per-party fills are revealed.
+#   No intermediate aggregates are ever made public.
+#
+# ============================================================================
 
-# Number of parties (fixed for this course)
+from Compiler.types import sint, cint, regint, Array
+
+# --- Configuration ---
 nparties = 3
-
-# Configuration (match generator defaults)
 N_ASSETS = 3
-N_ORDERS = None  # autodetected from Inputs files at compile-time
+N_ORDERS = 10
 
-# Read inputs as secrets during runtime and only reveal aggregates needed
-from Compiler.types import sint
+# Fixed price ladder: must cover all possible bid/ask prices.
+# BTC ~85-120, ETH ~185-220, SOL ~35-70 → single range covers all.
+PRICE_MIN = 30
+PRICE_MAX = 230
+N_PRICES = PRICE_MAX - PRICE_MIN + 1
 
-# Determine N_ORDERS and public prices from Inputs files (compile-time)
-public_bprice = [[[] for _ in range(N_ASSETS)] for _ in range(nparties)]
-public_aprice = [[[] for _ in range(N_ASSETS)] for _ in range(nparties)]
-for pid in range(nparties):
-	path = f"Inputs/Input-P{pid}-0"
-	with open(path) as f:
-		tokens = [line.strip() for line in f if line.strip()]
-		nums = [int(x) if '.' not in x else int(float(x)) for x in tokens]
-		calculated = len(nums) // (N_ASSETS * 4)
-		if N_ORDERS is None:
-			N_ORDERS = calculated
-		elif N_ORDERS != calculated:
-			raise ValueError(f"Inconsistent N_ORDERS: expected {N_ORDERS}, got {calculated} in {path}")
-		idx = 0
-		for a in range(N_ASSETS):
-			for o in range(N_ORDERS):
-				bp = nums[idx]; bq = nums[idx+1]; ap = nums[idx+2]; aq = nums[idx+3]
-				public_bprice[pid][a].append(bp)
-				public_aprice[pid][a].append(ap)
-				idx += 4
+TOTAL_ORDERS = nparties * N_ORDERS  # orders per asset across all parties
 
-# Runtime: read secret quantities
+# =============================================================================
+# PHASE 1: READ ALL INPUTS AS SECRETS
+# =============================================================================
+# No compile-time file access. Every value is read as sint.
+# Format: party -> asset -> order -> (bp, bq, ap, aq)
+
+secret_bp = [[[sint(0) for _ in range(N_ORDERS)] for _ in range(N_ASSETS)] for _ in range(nparties)]
 secret_bq = [[[sint(0) for _ in range(N_ORDERS)] for _ in range(N_ASSETS)] for _ in range(nparties)]
+secret_ap = [[[sint(0) for _ in range(N_ORDERS)] for _ in range(N_ASSETS)] for _ in range(nparties)]
 secret_aq = [[[sint(0) for _ in range(N_ORDERS)] for _ in range(N_ASSETS)] for _ in range(nparties)]
+
 for pid in range(nparties):
-	for a in range(N_ASSETS):
-		for o in range(N_ORDERS):
-			_bp = sint.get_input_from(pid)
-			bq = sint.get_input_from(pid)
-			_ap = sint.get_input_from(pid)
-			aq = sint.get_input_from(pid)
-			secret_bq[pid][a][o] = bq
-			secret_aq[pid][a][o] = aq
+    for a in range(N_ASSETS):
+        for o in range(N_ORDERS):
+            secret_bp[pid][a][o] = sint.get_input_from(pid)
+            secret_bq[pid][a][o] = sint.get_input_from(pid)
+            secret_ap[pid][a][o] = sint.get_input_from(pid)
+            secret_aq[pid][a][o] = sint.get_input_from(pid)
 
-# Process each asset: compute secret sums D(p), S(p), reveal them, select clearing price
+# =============================================================================
+# PHASE 2: PER-ASSET CLEARING (ALL OPERATIONS SECRET)
+# =============================================================================
+
 for asset in range(N_ASSETS):
-	prices = sorted(set([p for pid in range(nparties) for p in public_bprice[pid][asset] if p>0] + \
-						[p for pid in range(nparties) for p in public_aprice[pid][asset] if p>0]))
-	if not prices:
-		print_ln("Asset %s: no orders", asset)
-		continue
 
-	# For each price compute secret D(p), S(p) and their revealed regint values
-	D_regs = []
-	S_regs = []
-	V_regs = []
-	for p in prices:
-		D = sint(0)
-		S = sint(0)
-		for pid in range(nparties):
-			for o in range(N_ORDERS):
-				if public_bprice[pid][asset][o] >= p:
-					D = D + secret_bq[pid][asset][o]
-				if public_aprice[pid][asset][o] > 0 and public_aprice[pid][asset][o] <= p:
-					S = S + secret_aq[pid][asset][o]
-		D_pub = D.reveal()
-		S_pub = S.reveal()
-		D_regs.append(D_pub)
-		S_regs.append(S_pub)
-		# V_reg is the revealed minimal of D and S (regint)
-		V_reg = D_pub * (D_pub < S_pub) + S_pub * (1 - (D_pub < S_pub))
-		V_regs.append(V_reg)
+    # =========================================================================
+    # STEP A: Scan fixed price ladder, compute secret D(p), S(p), V(p)
+    # =========================================================================
+    # D(p) = sum of bid_qty where bid_price >= p AND bid_price > 0
+    # S(p) = sum of ask_qty where ask_price <= p AND ask_price > 0
+    # V(p) = min(D(p), S(p))
+    # All comparisons produce secret bits — no information leaks.
 
-	# select best V (regint) and compute p_low/p_high among prices achieving best V
-	best_V = V_regs[0]
-	for i in range(1, len(V_regs)):
-		v = V_regs[i]
-		gt = v > best_V
-		best_V = gt * v + (1 - gt) * best_V
+    best_V = sint(0)
+    p_low = sint(0)
+    p_high = sint(0)
 
-	# Compute mask per price for being best
-	masks = [ (V_regs[i] == best_V) for i in range(len(prices)) ]
+    for p_idx in range(N_PRICES):
+        p = PRICE_MIN + p_idx  # public loop variable (price level)
 
-	BIG = max(prices) + 1
-	# compute p_low: minimum price among those with mask==1
-	cur_min = masks[0] * prices[0] + (1 - masks[0]) * BIG
-	for i in range(1, len(prices)):
-		cand = masks[i] * prices[i] + (1 - masks[i]) * BIG
-		is_smaller = cand < cur_min
-		cur_min = is_smaller * cand + (1 - is_smaller) * cur_min
-	p_low = cur_min
+        # --- Compute D(p): secret aggregate demand ---
+        D_p = sint(0)
+        for pid in range(nparties):
+            for o in range(N_ORDERS):
+                bp = secret_bp[pid][asset][o]
+                bq = secret_bq[pid][asset][o]
+                # bid_eligible = (bp >= p) AND (bp > 0)
+                bid_eligible = (bp >= p) * (bp > 0)
+                D_p = D_p + bid_eligible * bq
 
-	# compute p_high: maximum price among those with mask==1
-	NEG_BIG = min(prices) - 1
-	cur_max = masks[0] * prices[0] + (1 - masks[0]) * NEG_BIG
-	for i in range(1, len(prices)):
-		cand = masks[i] * prices[i] + (1 - masks[i]) * NEG_BIG
-		is_bigger = cand > cur_max
-		cur_max = is_bigger * cand + (1 - is_bigger) * cur_max
-	p_high = cur_max
+        # --- Compute S(p): secret aggregate supply ---
+        S_p = sint(0)
+        for pid in range(nparties):
+            for o in range(N_ORDERS):
+                ap = secret_ap[pid][asset][o]
+                aq = secret_aq[pid][asset][o]
+                # ask_eligible = (ap <= p) AND (ap > 0)
+                ask_eligible = (ap <= p) * (ap > 0)
+                S_p = S_p + ask_eligible * aq
 
-	sum_ph = p_low + p_high
-	V_star = best_V
+        # --- V(p) = min(D, S) — secret ---
+        D_less = (D_p < S_p)
+        V_p = D_p * D_less + S_p * (sint(1) - D_less)
 
-	# Extract D_star_pub and S_star_pub corresponding to p_low (regints)
-	D_star_pub = 0
-	S_star_pub = 0
-	for i,p in enumerate(prices):
-		eq = (p == p_low)
-		D_star_pub = D_star_pub + eq * D_regs[i]
-		S_star_pub = S_star_pub + eq * S_regs[i]
+        # --- Oblivious update of best_V, p_low, p_high ---
+        is_new_best = (V_p > best_V)
+        is_plateau = (V_p == best_V) * (V_p > 0)
 
-	# Determine rationed side (public) and build unified entry list
-	rationed_buy = (D_star_pub > S_star_pub)
-	rationed_sell = 1 - rationed_buy
-	total_pool = rationed_buy * D_star_pub + rationed_sell * S_star_pub
+        # best_V = max(best_V, V_p)
+        best_V = is_new_best * V_p + (sint(1) - is_new_best) * best_V
 
-	entries = [(pid,o) for pid in range(nparties) for o in range(N_ORDERS)]
-	M = len(entries)
-	includes = [None] * M
-	for idx,(pid,o) in enumerate(entries):
-		include_buy = (public_bprice[pid][asset][o] >= p_low)
-		include_sell = (public_aprice[pid][asset][o] <= p_low) * (1 if public_aprice[pid][asset][o] > 0 else 0)
-		includes[idx] = rationed_buy * include_buy + rationed_sell * include_sell
+        # p_low: reset to p on new best only
+        p_low = is_new_best * sint(p) + (sint(1) - is_new_best) * p_low
 
-	# Pro-rata allocation across all entries using include masks
-	alloc = {}
-	shares_pub = [None] * M
-	assigned = 0
-	for idx,(pid,o) in enumerate(entries):
-		inc = includes[idx]
-		# choose q based on rationed side without Python branching
-		q_buy = secret_bq[pid][asset][o]
-		q_sell = secret_aq[pid][asset][o]
-		q = rationed_buy * q_buy + rationed_sell * q_sell
-		# Reveal per-order quantity for clear pro-rata computation
-		q_pub = q.reveal()
-		prod_pub = q_pub * V_star
-		denom = total_pool + (total_pool == 0)
-		mask_nonzero = (total_pool != 0)
-		share_pub = (prod_pub // denom) * mask_nonzero
-		shares_pub[idx] = inc * share_pub
-		assigned = assigned + shares_pub[idx]
+        # p_high: update on new best OR plateau (OR gate = a + b - a*b)
+        update_high = is_new_best + is_plateau - is_new_best * is_plateau
+        p_high = update_high * sint(p) + (sint(1) - update_high) * p_high
 
-	leftover = V_star - assigned
-	# compute prefix ranks among included entries and distribute leftover to first `leftover`
-	prefix = 0
-	for idx,(pid,o) in enumerate(entries):
-		inc = includes[idx]
-		rank = prefix
-		add_one = inc * (rank < leftover)
-		final_share = shares_pub[idx] + add_one
-		alloc[(pid,o)] = final_share
-		prefix = prefix + inc
+    # =========================================================================
+    # STEP B: Clearing price = (p_low + p_high) / 2  (SECRET)
+    # =========================================================================
+    # Division by public constant 2 is cheap in MP-SPDZ (no protocol needed).
+    clearing_price_sum = p_low + p_high
+    clearing_price_int = clearing_price_sum / 2
+    clearing_price_rem = clearing_price_sum % 2  # 1 if .5, 0 if exact
 
-	# Aggregate fills per party and reveal
-	fills = {pid: 0 for pid in range(nparties)}
-	for (pid,o),v in alloc.items():
-		fills[pid] = fills.get(pid, 0) + v
+    V_star = best_V
 
-	print_ln("Asset %s: price_low=%s price_high=%s traded=%s rationed_buy=%s", asset, p_low, p_high, V_star, rationed_buy)
-	for pid in range(nparties):
-		print_ln("  Party %s fill=%s", pid, fills[pid])
+    # =========================================================================
+    # STEP C: Determine rationed side (SECRET)
+    # =========================================================================
+    # Recompute D and S at p_low. Since p_low is secret, we use secret
+    # comparisons against it (sint >= sint produces secret bit).
+
+    D_at_plow = sint(0)
+    S_at_plow = sint(0)
+
+    for pid in range(nparties):
+        for o in range(N_ORDERS):
+            bp = secret_bp[pid][asset][o]
+            bq = secret_bq[pid][asset][o]
+            bid_ok = (bp >= p_low) * (bp > 0)
+            D_at_plow = D_at_plow + bid_ok * bq
+
+            ap = secret_ap[pid][asset][o]
+            aq = secret_aq[pid][asset][o]
+            ask_ok = (ap <= p_low) * (ap > 0)
+            S_at_plow = S_at_plow + ask_ok * aq
+
+    # rationed_buy = 1 if demand exceeds supply
+    rationed_buy = (D_at_plow > S_at_plow)
+    rationed_sell = sint(1) - rationed_buy
+
+    # total_pool = sum of quantities on the rationed side
+    total_pool = rationed_buy * D_at_plow + rationed_sell * S_at_plow
+
+    # =========================================================================
+    # STEP D: Pro-rata allocation (SECRET division)
+    # =========================================================================
+    # share_i = floor(q_i * V_star / total_pool)
+    # Uses sint / sint — triggers MP-SPDZ secure division protocol.
+    # Expensive but fully private.
+
+    # Guard division by zero
+    pool_is_zero = (total_pool == 0)
+    safe_denom = total_pool + pool_is_zero  # denom=1 if pool=0
+
+    shares = [sint(0)] * TOTAL_ORDERS
+    eligibles = [sint(0)] * TOTAL_ORDERS
+    assigned = sint(0)
+
+    for idx in range(TOTAL_ORDERS):
+        pid = idx // N_ORDERS
+        o = idx % N_ORDERS
+
+        bp = secret_bp[pid][asset][o]
+        bq = secret_bq[pid][asset][o]
+        ap = secret_ap[pid][asset][o]
+        aq = secret_aq[pid][asset][o]
+
+        # Eligibility on rationed side at p_low
+        buy_elig = (bp >= p_low) * (bp > 0)
+        sell_elig = (ap <= p_low) * (ap > 0)
+        eligible = rationed_buy * buy_elig + rationed_sell * sell_elig
+        eligibles[idx] = eligible
+
+        # Select quantity from rationed side
+        q = rationed_buy * bq + rationed_sell * aq
+        effective_q = eligible * q
+
+        # Secret floor division: share = floor(effective_q * V_star / safe_denom)
+        numerator = effective_q * V_star
+        share = numerator / safe_denom
+        share = share * (sint(1) - pool_is_zero)
+
+        shares[idx] = share
+        assigned = assigned + share
+
+    # =========================================================================
+    # STEP E: Leftover distribution (SECRET prefix rank)
+    # =========================================================================
+    # leftover = V_star - assigned
+    # First 'leftover' eligible orders each get +1 unit.
+
+    leftover = V_star - assigned
+    fills_per_party = [sint(0)] * nparties
+    prefix_rank = sint(0)
+
+    for idx in range(TOTAL_ORDERS):
+        pid = idx // N_ORDERS
+
+        # Order gets +1 if eligible AND its rank < leftover
+        gets_extra = eligibles[idx] * (prefix_rank < leftover)
+        final_fill = shares[idx] + gets_extra
+
+        # Accumulate per-party
+        fills_per_party[pid] = fills_per_party[pid] + final_fill
+
+        # Advance rank counter (only eligible orders count)
+        prefix_rank = prefix_rank + eligibles[idx]
+
+    # =========================================================================
+    # STEP F: REVEAL FINAL RESULTS ONLY
+    # =========================================================================
+    # This is the ONLY place .reveal() is called in the entire program.
+
+    print_ln("Asset %s: clearing_price=%s remainder=%s traded=%s",
+             asset,
+             clearing_price_int.reveal(),
+             clearing_price_rem.reveal(),
+             V_star.reveal())
+
+    for pid in range(nparties):
+        print_ln("  Party %s fill=%s", pid, fills_per_party[pid].reveal())

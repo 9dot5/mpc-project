@@ -6,7 +6,7 @@
 - [ ] **Inputs generated**: `python3 scripts/generate_inputs.py --n-orders 10 --seed 42`
 - [ ] **Program compiled**: `docker compose exec party0 bash -c 'cd /mp-spdz && python3 compile.py dark_auction'`
 - [ ] **Simulator tested**: `python3 -B simulator/dark_auction_sim.py --inputs Inputs --n-orders 10 --assets 3 --verbose`
-- [ ] **Edge cases passing**: `python3 -B tests/edge_cases.py` -> 5/5 PASS
+- [ ] **Edge cases passing**: `python3 -B tests/edge_cases.py` -> 7/7 PASS
 
 ---
 
@@ -18,7 +18,7 @@ head -20 inputs/party0.txt
 head -20 inputs/party1.txt
 ```
 
-**Say**: "Party 0 has 10 orders per asset. Each order: bid_price, bid_qty, ask_price, ask_qty. Prices are public (you can see them), quantities are secret (only MPC sees them)."
+**Say**: "Party 0 has 10 orders per asset. Each order: bid_price, bid_qty, ask_price, ask_qty. ALL values (prices AND quantities) are read as secrets at runtime via `sint.get_input_from()`. The MPC program uses a fixed price ladder to avoid any dynamic operations on secret data."
 
 ---
 
@@ -54,7 +54,7 @@ docker compose exec party1 bash -c 'cd /mp-spdz && ./mascot-party.x -N 3 -p 1 -i
 docker compose exec party2 bash -c 'cd /mp-spdz && ./mascot-party.x -N 3 -p 2 -ip Config/IPs -IF Inputs/Input dark_auction'
 ```
 
-**Say**: "MASCOT is a maliciously secure protocol — even if a party deviates from the protocol, it will be detected. Each party's quantities stay secret; only aggregates and final fills are revealed."
+**Say**: "MASCOT is a maliciously secure protocol — even if a party deviates from the protocol, it will be detected. All order data stays secret throughout — no intermediate values are revealed. Only the final clearing price, volume, and per-party fills are opened at the end."
 
 ---
 
@@ -79,26 +79,21 @@ python3 -B tests/edge_cases.py
 
 ## Anticipated Q&A
 
-### Q: Why reveal D(p) and S(p)?
+### Q: Do you reveal any intermediate values (D(p), S(p))?
 
-**A**: Required to compute V(p) = min(D,S) publicly and find the clearing price interval. Secret comparisons would cost 20–30× more. The trade-off: adversary learns coarse demand/supply distribution, but not individual quantities.
+**A**: No. The refactored implementation keeps ALL intermediate values as `sint` (secret integers). D(p), S(p), V(p), p_low, p_high, rationed side, and pro-rata shares are all computed in secret arithmetic. Only the final result (clearing price, volume, per-party fills) is revealed via `.reveal()`.
 
-### Q: What does adversary learn from revealed aggregates?
+### Q: What does the adversary learn?
 
-**A**: 
-- Which prices have high/low buyer/seller interest
-- Order of magnitude of quantities (indirectly, from pro-rata shares)
-- Exact individual quantities: NOT revealed
+**A**: Only the final auction output: clearing price per asset, total traded volume, and each party's aggregate fill. Individual order prices, quantities, and per-order allocations remain completely secret. Even colluding parties cannot reconstruct the third party's orders from the output alone.
 
-Cannot learn: which party bid what, exact order sizes.
+### Q: What's the computational cost of keeping everything secret?
 
-### Q: How would you make it fully private?
-
-**A**: Use secret bitonic sort + selection to compute p_low, p_high without revealing D(p), S(p). Cost: ~O(n² log n) comparisons instead of O(n) reveals. Trade-off: computation vs. communication.
+**A**: The main costs are: (1) scanning 201 price levels × 30 orders per asset with secret comparisons, (2) `sint/sint` division for pro-rata allocation (triggers MP-SPDZ secure division protocol). Total: ~6000 secret comparisons + 30 secure divisions per asset. More expensive than revealing intermediates, but provides strictly superior privacy.
 
 ### Q: What if two parties collude?
 
-**A**: They can subtract their own contribution from D(p), S(p) to estimate the third party's orders. Mitigation: secure aggregation (never reveal curves) or differential privacy noise.
+**A**: Since no intermediate aggregates are revealed, colluding parties only see the final fills (same as any party). They cannot subtract their contribution from D(p)/S(p) because those curves are never opened. The only attack vector is inference from the final output, which is minimal.
 
 ### Q: Why pro-rata allocation?
 
@@ -121,9 +116,9 @@ Bottleneck: number of unique prices.
 
 **A**: Clearing price = (p_low + p_high) / 2. Ensures fairness—doesn't favor buyers (lower) or sellers (higher). Standard in auction theory.
 
-### Q: Why are prices public?
+### Q: How does the fixed price ladder work?
 
-**A**: Prices define order structure—they're not secret inputs. They're compile-time constants. Quantities (secret) are paired with prices (public) to create orders.
+**A**: The program iterates over a public range [30, 230] one price level at a time. At each level `p`, it uses secret comparisons (`bp >= p`, `ap <= p`) to compute D(p) and S(p) as secret integers. The prices in the input ARE secret — they're compared against public ladder values using MPC comparison operators that produce secret bits. No information about actual bid/ask prices leaks from the ladder scan.
 
 ### Q: Can you show the pro-rata logic?
 
@@ -134,13 +129,14 @@ Bottleneck: number of unique prices.
 ## Code Pointers
 
 **dark_auction.mpc**:
-- Lines 1–48: Header with algorithm description and privacy analysis
-- Lines 50–65: Phase 1 — Compile-time price loading
-- Lines 67–82: Phase 2 — Runtime secret quantity reading
-- Lines 84–110: Phase 3B — D(p)/S(p) computation with .reveal()
-- Lines 112–140: Phase 3D-E — Clearing price selection + rationed side
-- Lines 142–170: Phase 3F — Pro-rata allocation with leftover distribution
-- Lines 172+: Phase 3G — Output
+- Lines 1–36: Header with strict MPC compliance rules, input format, privacy guarantee
+- Lines 38–55: Phase 1 — Read ALL inputs as secrets via `sint.get_input_from()`
+- Lines 57–114: Phase 2, Step A — Fixed price ladder scan (D(p), S(p), V(p) all secret)
+- Lines 116–124: Step B — Clearing price = (p_low + p_high) / 2 (secret)
+- Lines 126–152: Step C — Rationed side determination (secret comparison)
+- Lines 154–194: Step D — Pro-rata allocation with `sint/sint` division
+- Lines 196–217: Step E — Leftover distribution via secret prefix rank
+- Lines 219–231: Step F — ONLY `.reveal()` point (final results)
 
 **tests/edge_cases.py**:
 - 7 test cases (no-match, single-order, plateau, pro-rata, inactive party, multi-order, N=10 regression)

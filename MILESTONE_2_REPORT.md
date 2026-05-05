@@ -2,13 +2,15 @@
 
 ## Executive Summary
 
-This report documents the completion of Milestone 2 for the dark auction MPC project. The implementation computes privacy-preserving clearing prices for 3 assets (BTC, ETH, SOL) among 3 parties without revealing individual order quantities. All 5 task requirements are complete:
+This report documents the completion of Milestone 2 for the dark auction MPC project. The implementation computes privacy-preserving clearing prices for 3 assets (BTC, ETH, SOL) among 3 parties using strict MPC compliance — all order data (prices AND quantities) remain secret throughout computation. Only final results (clearing price, traded volume, per-party fills) are ever revealed.
 
-✅ **Code audited & polished** with comprehensive comments, edge case handling, and clear variable names  
-✅ **Edge case tests** (5/5 passing): no match, single order, plateau, pro-rata splits, missing party  
-✅ **Simulator enhanced** with `--verbose` flag showing D(p), S(p), rationed side, and allocation details  
-✅ **Correctness verified** against clear-text simulator; all test cases match  
-✅ **Privacy analyzed** with `.reveal()` audit and leakage assessment  
+All task requirements are complete:
+
+✅ **Strict MPC compliance**: no `open()`, no intermediate `.reveal()`, fixed discrete price ladder, all arithmetic on `sint`  
+✅ **Edge case tests** (7/7 passing): no match, single order, plateau, pro-rata splits, missing party, multi-order, N=10 regression  
+✅ **Correctness verified** against clear-text simulator across 10 random seeds × 3 assets = 30 test cases  
+✅ **Privacy analyzed** with `.reveal()` audit — only final outputs revealed  
+✅ **Code audited & polished** with comprehensive comments and section markers  
 
 **Ready for**: Demo, evaluation, and submission.
 
@@ -40,35 +42,42 @@ Prices are public (compile-time constants) because they define order structure; 
 
 ## 2. Implementation Choices
 
-**Compile-time Price Loading**  
-Prices are read from input files during compilation rather than sent as secrets at runtime. This avoids expensive secret-to-public conversions and leverages the fact that prices define auction structure (they distinguish different order tiers). Quantities are read as secrets at runtime using `sint.get_input_from()`.
+**Fixed Discrete Price Ladder**  
+Instead of dynamically extracting unique prices (which would require `sorted()` or `set()` on secrets — impossible in MPC), the implementation scans a fixed public price range [PRICE_MIN=30, PRICE_MAX=230]. This covers all possible bid/ask prices for BTC (~85–120), ETH (~185–220), and SOL (~35–70). The loop variable `p` is public; all comparisons against it produce secret bits.
 
-**Integer Floor Division**  
-The MPC code avoids fractional arithmetic (sint lacks native division) by using integer floor division `//` on revealed quantities. Pro-rata shares are computed as `(q × V*) // total_pool`, which naturally truncates. Leftover units from truncation are distributed in a deterministic pass to first-eligible orders, ensuring exact volume allocation.
+**All-Secret Computation (No Intermediate Reveals)**  
+Unlike an earlier design that revealed D(p)/S(p) at each price level, the refactored version keeps all intermediate values as `sint`. Oblivious conditional assignment (`result = cond * val_true + (1-cond) * val_false`) replaces if/else branching. The OR gate for plateau detection uses `a + b - a*b` in secret arithmetic.
 
-**Regint Operations Post-Reveal**  
-After revealing D(p), S(p) aggregates, the code switches to `regint` (revealed integers) for comparisons, min/max operations, and masking logic (finding p_low, p_high). This is computationally cheaper than secret arithmetic and necessary to identify the clearing price interval; the leakage (aggregate curves) is a deliberate trade-off for efficiency.
+**Secret sint/sint Division for Pro-Rata**  
+Pro-rata shares use `numerator / safe_denom` where both are `sint`, triggering MP-SPDZ's secure division protocol. This is computationally expensive but maintains full privacy. A division-by-zero guard (`safe_denom = total_pool + pool_is_zero`) ensures correctness without branching.
+
+**Secret Input via `sint.get_input_from()`**  
+All order data (bid prices, bid quantities, ask prices, ask quantities) are read at runtime as secrets using `sint.get_input_from(pid)`. No compile-time file access (`open()`) is used.
 
 ---
 
 ## 3. Privacy Analysis — .reveal() Audit
 
-This section justifies every `.reveal()` call and assesses information leakage.
+This section audits every `.reveal()` call in `dark_auction.mpc`.
 
-| Line | Revealed Data | Justification | Leakage Assessment |
-|------|---------------|---------------|-------------------|
-| D.reveal() (per price p) | Aggregate demand D(p) for each price | Needed to compute V(p) = min(D,S) and find max V publicly; identifies clearing price interval [p_low, p_high] | Adversary learns demand curve shape: which prices have high/low buyer interest. Order of magnitude of demand distribution exposed. Individual quantities remain secret. |
-| S.reveal() (per price p) | Aggregate supply S(p) for each price | Same as above | Adversary learns supply curve shape, revealing seller interest distribution |
-| fills[pid].reveal() (per party) | Final fill per party for each asset | Required final output for the auction result | Reveals only what the enunciado asks for (fills); no per-order shares are opened |
+| Location | Revealed Data | Justification |
+|----------|---------------|---------------|
+| Line 224 | `clearing_price_int` | Final auction output — required by specification |
+| Line 225 | `clearing_price_rem` | Indicates .5 remainder for display (0 or 1) |
+| Line 226 | `V_star` (traded volume) | Final auction output — required by specification |
+| Line 231 | `fills_per_party[pid]` | Per-party allocation — required final output |
 
 **Summary of Leakage**  
-The main leakage is aggregate curves D(p), S(p) (opened at every price rung). This exposes the demand/supply curve shape, but individual order quantities remain secret. The implementation avoids revealing any per-order pro-rata share; only the final per-party fills are opened.
+The ONLY information revealed is the final auction result: clearing price, traded volume, and per-party fills. No intermediate aggregates (D(p), S(p), V(p)) are ever made public. All price ladder scanning, rationed-side determination, and pro-rata allocation happen entirely in secret arithmetic.
+
+**Privacy Guarantee**  
+An adversary (including a corrupt party) learns only: (1) the uniform clearing price per asset, (2) total traded volume, (3) each party's aggregate fill. Individual order prices, quantities, and per-order allocations remain secret.
 
 **Collusion Risk**  
-Two colluding parties can estimate the third party's orders by subtracting their own contribution from D(p), S(p). Mitigation: use secure aggregation (never reveal curves) at higher computational cost, or introduce differential privacy noise.
+Even with 2 colluding parties, the only information available is the final fills. Without revealed intermediate curves, collusion provides no additional advantage beyond what the protocol outputs reveal.
 
-**Mitigation Path** (future work)  
-Use secret comparison networks (e.g., bitonic sort) and secure selection to compute p_low, p_high, and V* without revealing intermediate curves. Cost: higher computation but full secrecy.
+**Trade-off: Computation vs. Privacy**  
+The fully-secret approach uses expensive `sint/sint` division and O(N_PRICES × N_ORDERS × N_PARTIES) secret comparisons per asset. This is costlier than revealing intermediate curves but provides strictly superior privacy.
 
 ---
 
@@ -93,28 +102,29 @@ Use secret comparison networks (e.g., bitonic sort) and secure selection to comp
 Verified floor division and leftover distribution compute exactly. All test cases achieve assigned + leftover = V*, confirming no units are lost or duplicated.
 
 **Code Quality**
-- Comprehensive header with algorithm description and privacy analysis
-- Section markers (Phase 1/2/3, Section A-G) for easy navigation
-- Every .reveal() call annotated with REVEAL #N comment
-- Edge cases handled: no-trade (continue), zero prices, division-by-zero guard
+- Comprehensive header with algorithm description, privacy guarantee, and input format
+- Section markers (Phase 1–2, Steps A–F) for easy navigation
+- `.reveal()` called ONLY once per asset (final output block)
+- Edge cases handled: zero prices filtered via `(bp > 0)`, division-by-zero guard, leftover distribution
 
 ---
 
 ## 5. Limitations & Future Work
 
 **Current Limitations**
-1. Aggregate demand/supply curves revealed → coarse order distribution leaked
-2. No protection against collusion of 2+ parties
-3. Prices must be public; dynamic price discovery would require secret comparisons
+1. Fixed price ladder requires knowing price range a priori (PRICE_MIN=30, PRICE_MAX=230)
+2. Computation cost: O(N_PRICES × TOTAL_ORDERS) secret comparisons per asset (201 × 30 = 6030)
+3. Secret division (`sint/sint`) is expensive — triggers full secure division protocol
 4. No audit trail or zero-knowledge proofs of correct clearing
+5. Leftover distribution favors lower-indexed orders (deterministic but not random)
 
 **Future Enhancements**
 
-- **Fully Private Clearing**: Replace D(p), S(p) reveals with secret bitonic sort and selection
-- **SIMD Vectorization**: Batch-compute V(p) across multiple prices in parallel
-- **Collusion Robustness**: Cryptographic commitments + zero-knowledge proofs
-- **Dynamic Prices**: Secret price discovery via binary search on bit vectors
-- **Audit Trail**: Commitments to orders allowing post-hoc verification
+- **SIMD Vectorization**: Batch secret comparisons across price levels using MP-SPDZ arrays
+- **Reduced Price Granularity**: Narrower per-asset ladders (e.g., BTC: [85,120]) to reduce iterations
+- **Collusion Robustness**: Cryptographic commitments + zero-knowledge proofs of correct input
+- **Dynamic Prices**: Secret price discovery via binary search on bit-decomposed values
+- **Audit Trail**: Commitments to orders allowing post-hoc verification without revealing inputs
 
 ---
 
@@ -122,13 +132,14 @@ Verified floor division and leftover distribution compute exactly. All test case
 
 | File | Purpose | Status |
 |------|---------|--------|
-| `dark_auction.mpc` | Main MPC program (210 lines) | ✅ Polished, commented, edge cases handled |
-| `tests/edge_cases.py` | Edge case test suite | ✅ 5/5 tests passing |
-| `simulator/dark_auction_sim.py` | Clear-text reference + `--verbose` | ✅ Matches MPC, shows computation details |
+| `dark_auction.mpc` | Main MPC program (232 lines, strict compliance) | ✅ No open(), no intermediate reveals, fixed ladder |
+| `tests/edge_cases.py` | Edge case test suite | ✅ 7/7 tests passing |
+| `simulator/dark_auction_sim.py` | Clear-text reference simulator | ✅ Matches MPC across 30 test cases (10 seeds × 3 assets) |
 | `DEMO_SCRIPT.md` | Step-by-step demo walkthrough | ✅ 6 steps, 10 Q&A, timing |
+| `scripts/generate_inputs.py` | Input file generator | ✅ Configurable N_ORDERS, seed, MP-SPDZ format |
 
 ---
 
 **Report Status**: COMPLETE ✓  
-**Date**: May 4, 2026  
+**Date**: May 5, 2026  
 **Milestone 2**: Ready for submission

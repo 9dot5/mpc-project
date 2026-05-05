@@ -27,6 +27,9 @@ RUNS/*.log
 # Test temporaries
 tests/.tmp/
 
+# Virtual environment
+.venv/
+
 # OS files
 .DS_Store
 

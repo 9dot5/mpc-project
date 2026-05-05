@@ -34,11 +34,13 @@ def run_simulator(n_orders, assets):
 def parse_sim_output(txt):
     # returns dict asset -> (clearing_price, traded, fills dict)
     res = {}
-    lines = [l.strip() for l in txt.splitlines() if l.strip()]
+    lines = [l.rstrip() for l in txt.splitlines() if l.strip()]
     asset = None
+    # support named assets (BTC, ETH, SOL) mapping to indices 0,1,2
+    named = {'BTC': 0, 'ETH': 1, 'SOL': 2}
     for line in lines:
+        # Legacy numeric asset label: 'Asset 0: ...'
         if line.startswith('Asset'):
-            # Asset 0: clearing_price=98, traded=6
             parts = line.split(':', 1)[1].strip()
             toks = [t.strip() for t in parts.split(',')]
             cp = None; traded = None
@@ -48,8 +50,26 @@ def parse_sim_output(txt):
                 if t.startswith('traded='):
                     traded = t.split('=')[1]
             asset = int(line.split()[1].strip(':'))
-            res[asset] = {'clearing_price': cp, 'traded': traded, 'fills':{}}
-        elif line.startswith('Party') and asset is not None:
+            res[asset] = {'clearing_price': cp, 'traded': traded, 'fills': {}}
+        # Named assets: 'BTC: ...' or 'ETH: no trade'
+        elif any(line.startswith(name + ':') for name in named):
+            name = line.split(':', 1)[0]
+            aidx = named.get(name)
+            rest = line.split(':', 1)[1].strip()
+            if rest.lower().startswith('no trade'):
+                res[aidx] = {'clearing_price': None, 'traded': '0', 'fills': {}}
+                asset = aidx
+            else:
+                toks = [t.strip() for t in rest.split(',')]
+                cp = None; traded = None
+                for t in toks:
+                    if t.startswith('clearing_price='):
+                        cp = t.split('=')[1]
+                    if t.startswith('traded='):
+                        traded = t.split('=')[1]
+                res[aidx] = {'clearing_price': cp, 'traded': traded, 'fills': {}}
+                asset = aidx
+        elif line.strip().startswith('Party') and asset is not None:
             # Party 0 fill=6
             p = int(line.split()[1])
             v = int(line.split('=')[1])
