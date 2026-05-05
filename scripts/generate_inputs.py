@@ -41,7 +41,7 @@ def generate_readable(n_orders: int, use_sfix: bool, seed: int):
 
     for pid in range(N_PARTIES):
         path = os.path.join(READABLE_DIR, f"party{pid}.txt")
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write(f"# Party {pid} — dark-auction orders\n")
             f.write(f"# Each line: bid_price  bid_qty  ask_price  ask_qty\n")
             f.write(f"# A zero price means 'no order on that side'.\n")
@@ -87,7 +87,7 @@ def parse_readable(pid: int, use_sfix: bool):
     """
     path = os.path.join(READABLE_DIR, f"party{pid}.txt")
     values = []
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
@@ -110,7 +110,7 @@ def convert_to_mpspdz(use_sfix: bool):
     for pid in range(N_PARTIES):
         values = parse_readable(pid, use_sfix)
         path = os.path.join(MPSPDZ_DIR, f"Input-P{pid}-0")
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             for v in values:
                 if use_sfix and isinstance(v, float):
                     f.write(f"{v:.6f}\n")
@@ -165,13 +165,13 @@ def main():
         )
 
     if args.convert_only:
-        print("Converting readable files → MP-SPDZ format:")
+        print("Converting readable files -> MP-SPDZ format:")
         convert_to_mpspdz(args.sfix)
     else:
         print(f"Generating inputs: n_orders={args.n_orders}, "
               f"sfix={args.sfix}, seed={args.seed}")
         generate_readable(args.n_orders, args.sfix, args.seed)
-        print("\nConverting → MP-SPDZ format:")
+        print("\nConverting -> MP-SPDZ format:")
         convert_to_mpspdz(args.sfix)
 
     if args.summary or not args.convert_only:

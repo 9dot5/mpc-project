@@ -1,56 +1,21 @@
-# ============================================================================
-# dark_auction.mpc — Privacy-Preserving Dark Auction (Milestone 2)
-# ============================================================================
-#
-# PURPOSE:
-#   Sealed-bid double auction for 3 assets (BTC, ETH, SOL) among 3 parties.
-#   Computes uniform clearing price + pro-rata allocation without revealing
-#   individual order quantities.
-#
-# INPUTS:
-#   - Compile-time: Public prices (loaded from Inputs/Input-P{id}-0 files)
-#   - Runtime: Secret quantities via sint.get_input_from(party_id)
-#   - Format per order: bid_price, bid_qty, ask_price, ask_qty
-#
-# OUTPUTS (per asset):
-#   - Clearing price (midpoint of [p_low, p_high] interval)
-#   - Traded volume V*
-#   - Per-party fills (pro-rata allocated)
-#
-# ALGORITHM:
-#   1. Build price ladder from all unique non-zero bid/ask prices
-#   2. For each price p, compute D(p) and S(p) as secret sums, then reveal
-#   3. Find V* = max(min(D(p), S(p))) and the price interval achieving it
-#   4. Clearing price = (p_low + p_high) / 2 (midpoint tie-break)
-#   5. Determine rationed side; apply pro-rata: share_i = floor(q_i * V* / pool)
-#   6. Distribute leftover units to first eligible orders
-#
-# PRIVACY:
-#   - Quantities remain SECRET throughout
-#   - REVEALED: D(p), S(p) aggregates per price (demand/supply curve shape)
-#   - REVEALED: per-order pro-rata shares (for leftover distribution)
-#   - NOT revealed: individual order quantities, party-level contributions to D/S
-#   See MILESTONE_2_REPORT.md Section 3 for full .reveal() audit.
-#
-# ============================================================================
+# Dark auction prototype (Milestone 2 skeleton)
+# This is a small, self-contained skeleton to start Milestone 2.
+# It reads a small set of integers from each party and performs a placeholder
+# aggregation. Replace placeholder logic with full matching + pro-rata later.
 
+# Number of parties (fixed for this course)
+nparties = 3
+
+# Configuration (match generator defaults)
+N_ASSETS = 3
+N_ORDERS = None  # autodetected from Inputs files at compile-time
+
+# Read inputs as secrets during runtime and only reveal aggregates needed
 from Compiler.types import sint
 
-# --- Configuration ---
-nparties = 3
-N_ASSETS = 3
-N_ORDERS = None  # auto-detected from input files
-
-# ============================================================================
-# PHASE 1: COMPILE-TIME — Load public prices from input files
-# ============================================================================
-# Prices define auction structure. Loading them at compile-time avoids
-# expensive secret comparisons and allows the compiler to unroll loops
-# based on actual price values.
-
+# Determine N_ORDERS and public prices from Inputs files (compile-time)
 public_bprice = [[[] for _ in range(N_ASSETS)] for _ in range(nparties)]
 public_aprice = [[[] for _ in range(N_ASSETS)] for _ in range(nparties)]
-
 for pid in range(nparties):
 	path = f"Inputs/Input-P{pid}-0"
 	with open(path) as f:
@@ -69,51 +34,31 @@ for pid in range(nparties):
 				public_aprice[pid][a].append(ap)
 				idx += 4
 
-# ============================================================================
-# PHASE 2: RUNTIME — Read secret quantities from each party
-# ============================================================================
-# Input stream format: bp, bq, ap, aq per order. Prices are read and
-# discarded (already known from compile-time). Only quantities are kept.
-
+# Runtime: read secret quantities
 secret_bq = [[[sint(0) for _ in range(N_ORDERS)] for _ in range(N_ASSETS)] for _ in range(nparties)]
 secret_aq = [[[sint(0) for _ in range(N_ORDERS)] for _ in range(N_ASSETS)] for _ in range(nparties)]
-
 for pid in range(nparties):
 	for a in range(N_ASSETS):
 		for o in range(N_ORDERS):
-			_bp = sint.get_input_from(pid)  # bid price (discard, known at compile-time)
-			bq  = sint.get_input_from(pid)  # bid quantity (SECRET)
-			_ap = sint.get_input_from(pid)  # ask price (discard, known at compile-time)
-			aq  = sint.get_input_from(pid)  # ask quantity (SECRET)
+			_bp = sint.get_input_from(pid)
+			bq = sint.get_input_from(pid)
+			_ap = sint.get_input_from(pid)
+			aq = sint.get_input_from(pid)
 			secret_bq[pid][a][o] = bq
 			secret_aq[pid][a][o] = aq
 
-# ============================================================================
-# PHASE 3: PER-ASSET CLEARING
-# ============================================================================
-
+# Process each asset: compute secret sums D(p), S(p), reveal them, select clearing price
 for asset in range(N_ASSETS):
-
-	# --- 3A: Build price ladder (all unique non-zero prices) -----------------
-	prices = sorted(set(
-		[p for pid in range(nparties) for p in public_bprice[pid][asset] if p > 0] +
-		[p for pid in range(nparties) for p in public_aprice[pid][asset] if p > 0]
-	))
+	prices = sorted(set([p for pid in range(nparties) for p in public_bprice[pid][asset] if p>0] + \
+						[p for pid in range(nparties) for p in public_aprice[pid][asset] if p>0]))
 	if not prices:
 		print_ln("Asset %s: no orders", asset)
 		continue
 
-	# --- 3B: Compute D(p), S(p) for each price and reveal -------------------
-	# D(p) = sum of bid quantities where bid_price >= p  (aggregate demand)
-	# S(p) = sum of ask quantities where ask_price <= p  (aggregate supply)
-	# V(p) = min(D(p), S(p))
-	#
-	# .reveal() here leaks aggregate curve shape but NOT individual quantities.
-
+	# For each price compute secret D(p), S(p) and their revealed regint values
 	D_regs = []
 	S_regs = []
 	V_regs = []
-
 	for p in prices:
 		D = sint(0)
 		S = sint(0)
@@ -123,27 +68,26 @@ for asset in range(N_ASSETS):
 					D = D + secret_bq[pid][asset][o]
 				if public_aprice[pid][asset][o] > 0 and public_aprice[pid][asset][o] <= p:
 					S = S + secret_aq[pid][asset][o]
-		D_pub = D.reveal()    # REVEAL #1: aggregate demand at price p
-		S_pub = S.reveal()    # REVEAL #2: aggregate supply at price p
+		D_pub = D.reveal()
+		S_pub = S.reveal()
 		D_regs.append(D_pub)
 		S_regs.append(S_pub)
-		# V(p) = min(D, S) using regint selection
+		# V_reg is the revealed minimal of D and S (regint)
 		V_reg = D_pub * (D_pub < S_pub) + S_pub * (1 - (D_pub < S_pub))
 		V_regs.append(V_reg)
 
-	# --- 3C: Find V* = max V(p) ---------------------------------------------
+	# select best V (regint) and compute p_low/p_high among prices achieving best V
 	best_V = V_regs[0]
 	for i in range(1, len(V_regs)):
 		v = V_regs[i]
 		gt = v > best_V
 		best_V = gt * v + (1 - gt) * best_V
 
-	# --- 3D: Find [p_low, p_high] and compute clearing price ----------------
-	# Masks: which prices achieve best_V?
-	masks = [(V_regs[i] == best_V) for i in range(len(prices))]
+	# Compute mask per price for being best
+	masks = [ (V_regs[i] == best_V) for i in range(len(prices)) ]
 
-	# p_low = min price with mask == 1
 	BIG = max(prices) + 1
+	# compute p_low: minimum price among those with mask==1
 	cur_min = masks[0] * prices[0] + (1 - masks[0]) * BIG
 	for i in range(1, len(prices)):
 		cand = masks[i] * prices[i] + (1 - masks[i]) * BIG
@@ -151,7 +95,7 @@ for asset in range(N_ASSETS):
 		cur_min = is_smaller * cand + (1 - is_smaller) * cur_min
 	p_low = cur_min
 
-	# p_high = max price with mask == 1
+	# compute p_high: maximum price among those with mask==1
 	NEG_BIG = min(prices) - 1
 	cur_max = masks[0] * prices[0] + (1 - masks[0]) * NEG_BIG
 	for i in range(1, len(prices)):
@@ -160,75 +104,65 @@ for asset in range(N_ASSETS):
 		cur_max = is_bigger * cand + (1 - is_bigger) * cur_max
 	p_high = cur_max
 
-	# Clearing price = (p_low + p_high) / 2
 	sum_ph = p_low + p_high
 	V_star = best_V
 
-	# --- 3E: Determine rationed side ----------------------------------------
-	# At p_low: if D > S, buy side is rationed (excess demand)
-	D_star = sint(0)
-	S_star = sint(0)
-	for i, p in enumerate(prices):
+	# Extract D_star_pub and S_star_pub corresponding to p_low (regints)
+	D_star_pub = 0
+	S_star_pub = 0
+	for i,p in enumerate(prices):
 		eq = (p == p_low)
-		D_star = D_star + eq * D_regs[i]
-		S_star = S_star + eq * S_regs[i]
+		D_star_pub = D_star_pub + eq * D_regs[i]
+		S_star_pub = S_star_pub + eq * S_regs[i]
 
-	rationed_buy = (D_star > S_star)
+	# Determine rationed side (public) and build unified entry list
+	rationed_buy = (D_star_pub > S_star_pub)
 	rationed_sell = 1 - rationed_buy
-	total_pool = rationed_buy * D_star + rationed_sell * S_star
+	total_pool = rationed_buy * D_star_pub + rationed_sell * S_star_pub
 
-	# --- 3F: Pro-rata allocation ---------------------------------------------
-	# For each eligible order: share = floor(q * V* / total_pool)
-	# Leftover = V* - sum(shares) → distributed to first N eligible orders.
-
-	entries = [(pid, o) for pid in range(nparties) for o in range(N_ORDERS)]
+	entries = [(pid,o) for pid in range(nparties) for o in range(N_ORDERS)]
 	M = len(entries)
-
-	# Eligibility mask: is this order on the rationed side at clearing price?
 	includes = [None] * M
-	for idx, (pid, o) in enumerate(entries):
+	for idx,(pid,o) in enumerate(entries):
 		include_buy = (public_bprice[pid][asset][o] >= p_low)
 		include_sell = (public_aprice[pid][asset][o] <= p_low) * (1 if public_aprice[pid][asset][o] > 0 else 0)
 		includes[idx] = rationed_buy * include_buy + rationed_sell * include_sell
 
-	# Compute pro-rata shares
+	# Pro-rata allocation across all entries using include masks
 	alloc = {}
 	shares_pub = [None] * M
 	assigned = 0
-	for idx, (pid, o) in enumerate(entries):
+	for idx,(pid,o) in enumerate(entries):
 		inc = includes[idx]
-		# Select quantity from rationed side (avoids branching on secrets)
+		# choose q based on rationed side without Python branching
 		q_buy = secret_bq[pid][asset][o]
 		q_sell = secret_aq[pid][asset][o]
 		q = rationed_buy * q_buy + rationed_sell * q_sell
-		# Integer floor division: share = floor(q * V* / total_pool)
-		prod = q * V_star
-		denom = total_pool + (total_pool == 0)      # guard against /0
+		# Reveal per-order quantity for clear pro-rata computation
+		q_pub = q.reveal()
+		prod_pub = q_pub * V_star
+		denom = total_pool + (total_pool == 0)
 		mask_nonzero = (total_pool != 0)
-		share = (prod // denom) * mask_nonzero
-		# REVEAL #3: per-order share (needed for leftover distribution)
-		share_pub = share.reveal()
+		share_pub = (prod_pub // denom) * mask_nonzero
 		shares_pub[idx] = inc * share_pub
 		assigned = assigned + shares_pub[idx]
 
-	# Distribute leftover units to first eligible orders
 	leftover = V_star - assigned
+	# compute prefix ranks among included entries and distribute leftover to first `leftover`
 	prefix = 0
-	for idx, (pid, o) in enumerate(entries):
+	for idx,(pid,o) in enumerate(entries):
 		inc = includes[idx]
 		rank = prefix
 		add_one = inc * (rank < leftover)
 		final_share = shares_pub[idx] + add_one
-		alloc[(pid, o)] = final_share
+		alloc[(pid,o)] = final_share
 		prefix = prefix + inc
 
-	# --- 3G: Output ----------------------------------------------------------
+	# Aggregate fills per party and reveal
 	fills = {pid: 0 for pid in range(nparties)}
-	for (pid, o), v in alloc.items():
+	for (pid,o),v in alloc.items():
 		fills[pid] = fills.get(pid, 0) + v
 
-	# Print: clearing_price_x2 (double to avoid fractions), is_half flag, V*, rationed side
-	print_ln("Asset %s: clearing_price_x2=%s traded=%s rationed_buy=%s",
-	         asset, sum_ph, V_star, rationed_buy)
+	print_ln("Asset %s: price_low=%s price_high=%s traded=%s rationed_buy=%s", asset, p_low, p_high, V_star, rationed_buy)
 	for pid in range(nparties):
 		print_ln("  Party %s fill=%s", pid, fills[pid])

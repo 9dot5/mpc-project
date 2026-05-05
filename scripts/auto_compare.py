@@ -36,44 +36,24 @@ def parse_sim_output(txt):
     res = {}
     lines = [l.strip() for l in txt.splitlines() if l.strip()]
     asset = None
-    asset_map = {'BTC': 0, 'ETH': 1, 'SOL': 2}
     for line in lines:
-        if line.startswith('Party') and asset is not None:
+        if line.startswith('Asset'):
+            # Asset 0: clearing_price=98, traded=6
+            parts = line.split(':', 1)[1].strip()
+            toks = [t.strip() for t in parts.split(',')]
+            cp = None; traded = None
+            for t in toks:
+                if t.startswith('clearing_price='):
+                    cp = t.split('=')[1]
+                if t.startswith('traded='):
+                    traded = t.split('=')[1]
+            asset = int(line.split()[1].strip(':'))
+            res[asset] = {'clearing_price': cp, 'traded': traded, 'fills':{}}
+        elif line.startswith('Party') and asset is not None:
             # Party 0 fill=6
             p = int(line.split()[1])
             v = int(line.split('=')[1])
             res[asset]['fills'][p] = v
-            continue
-
-        if ':' not in line:
-            continue
-
-        label, payload = line.split(':', 1)
-        label = label.strip()
-        payload = payload.strip()
-
-        if label.startswith('Asset'):
-            # Asset 0: clearing_price=98, traded=6
-            asset = int(label.split()[1])
-        elif label in asset_map:
-            # BTC: clearing_price=98, traded=6
-            asset = asset_map[label]
-        else:
-            asset = asset
-
-        if label.startswith('Asset') or label in asset_map:
-            if payload == 'no trade':
-                res[asset] = {'clearing_price': None, 'traded': '0', 'fills': {}}
-                continue
-            toks = [t.strip() for t in payload.split(',')]
-            cp = None
-            traded = None
-            for t in toks:
-                if t.startswith('clearing_price='):
-                    cp = t.split('=', 1)[1]
-                if t.startswith('traded='):
-                    traded = t.split('=', 1)[1]
-            res[asset] = {'clearing_price': cp, 'traded': traded, 'fills': {}}
     return res
 
 
