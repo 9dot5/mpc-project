@@ -20,8 +20,15 @@ def read_inputs(input_dir, nparties, n_assets, n_orders):
     for pid in range(nparties):
         path = os.path.join(input_dir, f"Input-P{pid}-0")
         with open(path) as f:
-            vals = [line.strip() for line in f if line.strip()]
-            vals = [float(v) if '.' in v else int(v) for v in vals]
+            raw_vals = [line.strip() for line in f if line.strip()]
+        vals = []
+        for v in raw_vals:
+            if '.' in v:
+                raise ValueError("Decimal prices are not supported: found '{}' in {}".format(v, path))
+            try:
+                vals.append(int(v))
+            except ValueError:
+                raise ValueError(f"Non-integer input value '{v}' in {path}")
         expected = n_assets * n_orders * 4
         if len(vals) < expected:
             raise ValueError(f"Input {path} has {len(vals)} values, expected {expected}")
