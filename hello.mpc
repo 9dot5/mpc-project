@@ -1,0 +1,14 @@
+# Minimal "Hello MPC" program
+# Each party inputs a secret integer
+# The program outputs their sum (revealed)
+
+# Each party inputs a secret integer
+x = sint.get_input_from(0)
+y = sint.get_input_from(1)
+z = sint.get_input_from(2)
+
+# Compute the sum
+total = x + y + z
+
+# Reveal the result
+print_ln("Sum: %s", total.reveal())

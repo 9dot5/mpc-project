@@ -1,20 +1,40 @@
-# MP-SPDZ runtime state (inputs, certs, sockets, etc.)
+# MP-SPDZ runtime state
 Player-Data/*
 !Player-Data/.gitkeep
 
-# Static/run configuration and test inputs (generated)
+# Generated input files (re-generate with scripts/generate_inputs.py)
+Inputs/Input-P*-*
 Inputs/Input-Binary-P*-*
-!Config/.gitkeep
 !Inputs/.gitkeep
 
 # MP-SPDZ build artifacts
-Bytecode/*
-!Bytecode/.gitkeep
-Functions/*
-!Functions/.gitkeep
-Public-Inputs/*
-!Public-Inputs/.gitkeep
-Scedule/*
-!Scedule/.gitkeep
-*.mpc
-*.md
+Bytecode/
+Schedules/
+Functions/
+Public-Inputs/
+
+# Python cache
+__pycache__/
+*.pyc
+simulator/__pycache__/
+scripts/__pycache__/
+
+# Run artifacts
+RUNS/docker_*/
+RUNS/*.csv
+RUNS/*.log
+
+# Test temporaries
+tests/.tmp/
+
+# OS files
+.DS_Store
+
+# Local scratch/backups
+*.bak
+
+# Working notes (not deliverables)
+M2_WORK_BRIEFING.md
+HAIKU_PROMPT.md
+MILESTONE_1_STUDY_GUIDE.md
+MILESTONE_1_REPORT_TEMPLATE.md

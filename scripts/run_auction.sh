@@ -17,8 +17,8 @@
 # ─────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-prog="${1:-dark-auction}"
-shift 2>/dev/null || true                    # remaining args are protocols
+prog="${1:-dark_auction}"
+shift 1 2>/dev/null || true                  # remaining args are protocols
 protocols=("${@:-mascot}")
 if [ "${#protocols[@]}" -eq 0 ]; then
   protocols=(mascot)
@@ -50,7 +50,7 @@ EOF
 # (or for sfix: prices as floats, quantities as ints)
 if [ ! -f Inputs/.generated ] || [ "$prog" != "$(cat Inputs/.generated 2>/dev/null)" ]; then
   echo "Generating sample inputs for $prog ..."
-  python3 scripts/generate_inputs.py "$prog"
+  python3 scripts/generate_inputs.py
   echo "$prog" > Inputs/.generated
 fi
 

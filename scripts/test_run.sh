@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-prog="${1:-dark-auction}"
+prog="${1:-dark_auction}"
 nparties=3
 
 # ── Cleanup stale processes ─────────────────────────────────────────────

@@ -18,8 +18,7 @@ Usage examples:
   # Convert hand-edited readable files to MP-SPDZ format:
   python3 scripts/generate_inputs.py --convert-only
 
-  # Generate sfix (fixed-point) inputs:
-  python3 scripts/generate_inputs.py --sfix --n-orders 10 --seed 42
+  # The current auction implementation only supports integer prices.
 """
 import argparse
 import os
@@ -152,12 +151,18 @@ def main():
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed (default: 42)")
     parser.add_argument("--sfix", action="store_true",
-                        help="Use fixed-point prices")
+                        help="Unsupported: fixed-point prices are not available")
     parser.add_argument("--convert-only", action="store_true",
                         help="Only convert existing readable files to MP-SPDZ")
     parser.add_argument("--summary", action="store_true",
                         help="Print summary of inputs after generation")
     args = parser.parse_args()
+
+    if args.sfix:
+        parser.error(
+            "--sfix is not supported by the current integer-based auction "
+            "implementation. Use integer prices."
+        )
 
     if args.convert_only:
         print("Converting readable files → MP-SPDZ format:")
