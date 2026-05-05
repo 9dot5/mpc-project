@@ -143,3 +143,20 @@ Verified floor division and leftover distribution compute exactly. All test case
 **Report Status**: COMPLETE ✓  
 **Date**: May 5, 2026  
 **Milestone 2**: Ready for submission
+
+## 7. Additional benchmark attempt (May 5, 2026)
+
+- **What I ran**: `scripts/validate_end_to_end.py --seed 42 --n-orders 10` — generates inputs and runs the 3 MASCOT parties via `docker compose exec`.
+- **Observed result**: the validator timed out waiting for `party0` to finish. Python raised:
+
+  `subprocess.TimeoutExpired: Command 'docker compose exec -T -w /mp-spdz party0 ./mascot-party.x -N 3 -p 0 -ip Config/IPs -IF Inputs/Input dark_auction' timed out after 180 seconds`
+
+- **Diagnosis**: the containers start and prime-generation proceeds, but the MPC run exceeded the 180s timeout or stalled during the online phase. Possible causes include heavy secure-division work, Windows/PowerShell I/O quirks, or a transient communication/reset between parties.
+- **What I did**: regenerated `Inputs/Input-P*` with `--n-orders 10` to match the compiled program and retried; the run still hit the timeout.
+- **Recommendations / next steps**:
+  - Re-run the validator with a larger timeout (e.g., 600s) or launch `mascot-party.x` manually and wait for completion.
+  - Run `scripts/benchmark.sh` (or `validate_end_to_end.py`) inside WSL/Linux for more reliable process handling.
+  - If the hang persists, collect container logs (`docker logs mpc_party_0`) and look for `Fatal`/`connection reset` messages.
+  - Consider narrowing price ladder or reducing N_ORDERS for faster interactive benchmarking.
+
+This note documents the benchmark attempt and recommended follow-ups; all functional tests and the main E2E validation that completed earlier are still recorded above.
