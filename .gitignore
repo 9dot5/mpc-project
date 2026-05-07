@@ -22,22 +22,4 @@ scripts/__pycache__/
 # Run artifacts
 RUNS/docker_*/
 RUNS/*.csv
-RUNS/*.log
-
-# Test temporaries
-tests/.tmp/
-
-# Virtual environment
-.venv/
-
-# OS files
-.DS_Store
-
-# Local scratch/backups
-*.bak
-
-# Working notes (not deliverables)
-M2_WORK_BRIEFING.md
-HAIKU_PROMPT.md
-MILESTONE_1_STUDY_GUIDE.md
-MILESTONE_1_REPORT_TEMPLATE.md
+RUNS/

@@ -145,26 +145,4 @@ def main():
                         cmd = f'docker compose exec party{pid} bash -lc "cd /mp-spdz && ./mascot-party.x -N 3 -p {pid} -ip Config/IPs -IF Inputs/Input \"dark_auction\""'
                         cmds.append(cmd)
                     procs = [subprocess.Popen(c, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) for c in cmds]
-                    outs = []
-                    for pproc in procs:
-                        out_text, _ = pproc.communicate()
-                        outs.append(out_text)
-                    combined = '\n'.join(outs)
-                    print('--- MPC combined output ---')
-                    print(combined)
-                    # naive parse: reuse parse_sim_output on combined output
-                    parsed_mpc = parse_sim_output(combined)
-                    # Compare parsed and parsed_mpc and print differences (simple)
-                    for asset in range(args.assets):
-                        sim_r = parsed.get(asset)
-                        mpc_r = parsed_mpc.get(asset)
-                        if sim_r != mpc_r:
-                            print(f'Asset {asset}: MISMATCH between simulator and MPC')
-                        else:
-                            print(f'Asset {asset}: OK (sim == mpc)')
-
-    print(f"Wrote results to {outp}")
-
-
-if __name__ == '__main__':
-    main()
+               
