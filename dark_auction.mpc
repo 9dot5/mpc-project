@@ -28,6 +28,9 @@
 #   OPT-4: Steps C and D merged into single pass (avoid recomputing eligibility)
 #   OPT-5: Precompute (ap > 0) bits once per asset, reused across all price levels
 #          → saves N_PRICES × N_ORDERS comparisons per asset
+#   OPT-7: Single-pass eligibility — compute both buy/sell eligibility in
+#          one loop, select correct side after determining rationed_buy.
+#          Eliminates 60 expensive sint>=sint comparisons per asset.
 #
 # ============================================================================
 
@@ -154,143 +157,87 @@ for asset in range(N_ASSETS):
 
     V_star = best_V
 
+
     # =========================================================================
-    # STEPS C+D (MERGED — OPT-4): Rationed side + Pro-rata allocation
+    # STEPS C+D+E (MERGED — OPT-4, OPT-7): Per-order pro-rata allocation
     # =========================================================================
-    # Recompute D and S at p_low to determine rationed side.
-    # Since p_low is secret, these are sint >= sint comparisons (more expensive
-    # than sint >= public, but only done once, not per price level).
-    # Then immediately compute pro-rata shares in the same pass structure.
+    # Per-ORDER pro-rata as specified in PROJECT-STATEMENT.txt Section 2.4:
+    #   fill_i = floor(q_i * V* / total_pool)
+    # where i is an individual order on the rationed side.
+    # Leftover units go to the first eligible orders (by party, then order index).
+    #
+    # OPT-7: Single pass — compute eligibility for BOTH sides simultaneously,
+    #         then select the correct side after determining rationed_buy.
+    #         Eliminates a second pass (saves 60 sint>=sint comparisons/asset).
 
     D_at_plow = sint(0)
     S_at_plow = sint(0)
+
+    # Per-order eligibility bits and quantities for BOTH sides (single pass)
+    order_bid_ok = [[sint(0) for _ in range(N_ORDERS)] for _ in range(nparties)]
+    order_ask_ok = [[sint(0) for _ in range(N_ORDERS)] for _ in range(nparties)]
 
     for pid in range(nparties):
         for o in range(N_ORDERS):
             bp = secret_bp[pid][asset][o]
             bq = secret_bq[pid][asset][o]
-            # OPT-2: no (bp > 0) needed — (bp >= p_low) handles it since p_low >= P_MIN >= 1
-            D_at_plow = D_at_plow + (bp >= p_low) * bq
-
             ap = secret_ap[pid][asset][o]
             aq = secret_aq[pid][asset][o]
-            # OPT-5: reuse precomputed ap_active
-            S_at_plow = S_at_plow + (ap <= p_low) * ap_active[pid][o] * aq
 
-    # rationed_buy = 1 if demand exceeds supply
+            # OPT-2: no (bp > 0) needed since p_low >= 1
+            bid_ok = (bp >= p_low)
+            order_bid_ok[pid][o] = bid_ok
+            D_at_plow = D_at_plow + bid_ok * bq
+
+            # OPT-5: reuse precomputed ap_active
+            ask_ok = (ap <= p_low) * ap_active[pid][o]
+            order_ask_ok[pid][o] = ask_ok
+            S_at_plow = S_at_plow + ask_ok * aq
+
+    # Determine rationed side (secret)
     rationed_buy = (D_at_plow > S_at_plow)
     rationed_sell = sint(1) - rationed_buy
-
-    # total_pool = sum of quantities on the rationed side
     total_pool = rationed_buy * D_at_plow + rationed_sell * S_at_plow
 
     # Guard division by zero
     pool_is_zero = (total_pool == 0)
     safe_denom = total_pool + pool_is_zero  # denom=1 if pool=0
 
-    shares = [sint(0)] * TOTAL_ORDERS
-    eligibles = [sint(0)] * TOTAL_ORDERS
+    # Per-order pro-rata: fill_i = floor(q_i * V* / total_pool)
+    # Then aggregate fills per party for the final output.
+    fills_per_party = [sint(0)] * nparties
     assigned = sint(0)
 
-    for idx in range(TOTAL_ORDERS):
-        pid = idx // N_ORDERS
-        o = idx % N_ORDERS
-
-        bp = secret_bp[pid][asset][o]
-        bq = secret_bq[pid][asset][o]
-        ap = secret_ap[pid][asset][o]
-        aq = secret_aq[pid][asset][o]
-
-        # Eligibility on rationed side at p_low
-        # OPT-2: no (bp > 0) for bids; OPT-5: precomputed ap_active for asks
-        buy_elig = (bp >= p_low)
-        sell_elig = (ap <= p_low) * ap_active[pid][o]
-        eligible = rationed_buy * buy_elig + rationed_sell * sell_elig
-        eligibles[idx] = eligible
-
-        # Select quantity from rationed side
-        q = rationed_buy * bq + rationed_sell * aq
-        effective_q = eligible * q
-
-        # Secret floor division: share = floor(effective_q * V_star / safe_denom)
-        # Uses sint / sint — triggers MP-SPDZ secure division protocol.
-        numerator = effective_q * V_star
-        share = numerator / safe_denom
-        share = share * (sint(1) - pool_is_zero)
-
-        shares[idx] = share
-        assigned = assigned + share
-
-    # =========================================================================
-    # STEP E: Leftover distribution (SECRET prefix rank)
-    # =========================================================================
-    # leftover = V_star - assigned
-    # First 'leftover' eligible orders each get +1 unit.
-
-    leftover = V_star - assigned
-    fills_per_party = [sint(0)] * nparties
-    prefix_rank = sint(0)
-
-    for idx in range(TOTAL_ORDERS):
-        pid = idx // N_ORDERS
-
-        # Order gets +1 if eligible AND its rank < leftover
-        gets_extra = eligibles[idx] * (prefix_rank < leftover)
-        final_fill = shares[idx] + gets_extra
-
-        # Accumulate per-party
-        fills_per_party[pid] = fills_per_party[pid] + final_fill
-
-        # Advance rank counter (only eligible orders count)
-        prefix_rank = prefix_rank + eligibles[idx]
-
-    # =========================================================================
-    # STEP F: REVEAL FINAL RESULTS ONLY
-    # =========================================================================
-    # This is the ONLY place .reveal() is called in the entire program.
-
-    print_ln("Asset %s: clearing_price=%s remainder=%s traded=%s",
-             asset,
-             clearing_price_int.reveal(),
-             clearing_price_rem.reveal(),
-             V_star.reveal())
-
     for pid in range(nparties):
-        print_ln("  Party %s fill=%s", pid, fills_per_party[pid].reveal())
- bq + rationed_sell * aq
-        effective_q = eligible * q
+        for o in range(N_ORDERS):
+            bq = secret_bq[pid][asset][o]
+            aq = secret_aq[pid][asset][o]
 
-        # Secret floor division: share = floor(effective_q * V_star / safe_denom)
-        # Uses sint / sint — triggers MP-SPDZ secure division protocol.
-        numerator = effective_q * V_star
-        share = numerator / safe_denom
-        share = share * (sint(1) - pool_is_zero)
+            # Select eligible quantity based on rationed side
+            eligible = rationed_buy * order_bid_ok[pid][o] + rationed_sell * order_ask_ok[pid][o]
+            q = rationed_buy * bq + rationed_sell * aq
+            elig_q = eligible * q
 
-        shares[idx] = share
-        assigned = assigned + share
+            # Per-order share: floor(q_i * V* / total_pool)
+            numerator = elig_q * V_star
+            share = numerator / safe_denom
+            share = share * (sint(1) - pool_is_zero)
 
-    # =========================================================================
-    # STEP E: Leftover distribution (SECRET prefix rank)
-    # =========================================================================
-    # leftover = V_star - assigned
-    # First 'leftover' eligible orders each get +1 unit.
+            fills_per_party[pid] = fills_per_party[pid] + share
+            assigned = assigned + share
 
+    # Leftover distribution: +1 to first eligible orders (by party, then order)
     leftover = V_star - assigned
-    fills_per_party = [sint(0)] * nparties
-    prefix_rank = sint(0)
-
-    for idx in range(TOTAL_ORDERS):
-        pid = idx // N_ORDERS
-
-        # Order gets +1 if eligible AND its rank < leftover
-        gets_extra = eligibles[idx] * (prefix_rank < leftover)
-        final_fill = shares[idx] + gets_extra
-
-        # Accumulate per-party
-        fills_per_party[pid] = fills_per_party[pid] + final_fill
-
-        # Advance rank counter (only eligible orders count)
-        prefix_rank = prefix_rank + eligibles[idx]
+    for pid in range(nparties):
+        for o in range(N_ORDERS):
+            bq = secret_bq[pid][asset][o]
+            aq = secret_aq[pid][asset][o]
+            eligible = rationed_buy * order_bid_ok[pid][o] + rationed_sell * order_ask_ok[pid][o]
+            q = rationed_buy * bq + rationed_sell * aq
+            has_qty = eligible * (q > 0)
+            gets_extra = has_qty * (leftover > 0)
+            fills_per_party[pid] = fills_per_party[pid] + gets_extra
+            leftover = leftover - gets_extra
 
     # =========================================================================
     # STEP F: REVEAL FINAL RESULTS ONLY

@@ -15,12 +15,21 @@ def read_inputs(input_dir, nparties, n_assets, n_orders):
     parties = []
     for pid in range(nparties):
         path = os.path.join(input_dir, f"Input-P{pid}-0")
-        with open(path) as f:
-            vals = [line.strip() for line in f if line.strip()]
-            vals = [float(v) if '.' in v else int(v) for v in vals]
+        with open(path, encoding="utf-8") as f:
+            raw_vals = [line.strip() for line in f if line.strip()]
+        vals = []
+        for v in raw_vals:
+            if '.' in v:
+                raise ValueError("Decimal prices are not supported: found '{}' in {}".format(v, path))
+            try:
+                vals.append(int(v))
+            except ValueError:
+                raise ValueError(f"Non-integer input value '{v}' in {path}")
+
         expected = n_assets * n_orders * 4
         if len(vals) < expected:
             raise ValueError(f"Input {path} has {len(vals)} values, expected {expected}")
+
         # reshape: for each asset, for each order: bp bq ap aq
         orders = []
         idx = 0
@@ -78,28 +87,31 @@ def simulate_one_asset(bids, asks):
         pool = [(price,q,pid,o) for price,q,pid,o in asks if price <= p_low]
         total_pool = sum(q for _,q,_,_ in pool)
 
-    alloc = defaultdict(int)
+    # Per-ORDER pro-rata (Section 2.4 of PROJECT-STATEMENT.txt):
+    #   fill_i = floor(q_i * V* / total_pool)
+    # Leftover units go to the first eligible orders (by party, then order).
+    # Fills are then aggregated per party for the final output.
+    alloc = defaultdict(int)  # (pid, order_idx) -> fill
     assigned = 0
     if total_pool > 0:
-        for price,q,pid,o in pool:
+        for price, q, pid, o in pool:
             share = (q * V_star) // total_pool
-            alloc[(pid,o)] += share
+            alloc[(pid, o)] = share
             assigned += share
         leftover = V_star - assigned
-        idx = 0
-        while leftover > 0 and pool:
-            pid = pool[idx % len(pool)][2]
-            o = pool[idx % len(pool)][3]
-            alloc[(pid,o)] += 1
-            leftover -= 1
-            idx += 1
+        for price, q, pid, o in pool:
+            if leftover <= 0:
+                break
+            if q > 0:
+                alloc[(pid, o)] += 1
+                leftover -= 1
 
+    # Aggregate per-order fills into per-party fills
     fills = defaultdict(int)
-    for (pid,o),v in alloc.items():
-        fills[pid] += v
+    for (pid, o), fill in alloc.items():
+        fills[pid] += fill
 
     return {'price': clearing_price, 'traded': V_star, 'fills': dict(fills)}
-
 def simulate(parties, n_assets, n_orders):
     nparties = len(parties)
     results = []

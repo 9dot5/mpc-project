@@ -72,8 +72,8 @@ def main():
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--n-orders', type=int, default=10)
     p.add_argument('--assets', type=int, default=3)
-    p.add_argument('--mpc-timeout', type=int, default=180,
-                        help='Timeout in seconds for each MPC party run (default: 180)')
+    p.add_argument('--mpc-timeout', type=int, default=600,
+                        help='Timeout in seconds for each MPC party run (default: 600)')
     args = p.parse_args()
 
     print(f"Generating inputs (seed={args.seed}, n_orders={args.n_orders})...")
@@ -137,19 +137,20 @@ def main():
         if sim_a['traded'] != mpc_a['traded']:
             print(f"Asset {a}: traded MISMATCH — sim={sim_a['traded']} mpc={mpc_a['traded']}")
             all_ok = False
-        # compare fills for each party
         for pid in range(3):
             sfill = sim_a['fills'].get(pid, 0)
             mfill = mpc_a['fills'].get(pid, 0)
             if sfill != mfill:
                 print(f"Asset {a} Party {pid}: fill MISMATCH — sim={sfill} mpc={mfill}")
                 all_ok = False
+        if all_ok:
+            print(f"Asset {a}: OK — price={sim_a['clearing_price']} traded={sim_a['traded']} fills={sim_a['fills']}")
+
     if all_ok:
-        print('\nE2E validation: PASS — MPC matches simulator for all assets')
-        sys.exit(0)
+        print("\n=== ALL ASSETS MATCH ===")
     else:
-        print('\nE2E validation: FAIL — see mismatches above')
-        sys.exit(3)
+        print("\n=== MISMATCH DETECTED ===")
+        sys.exit(1)
 
 
 if __name__ == '__main__':

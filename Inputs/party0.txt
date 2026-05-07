@@ -1,9 +1,9 @@
-# Party 0 — dark-auction orders
+# Party 0 - dark-auction orders
 # Each line: bid_price  bid_qty  ask_price  ask_qty
 # A zero price means 'no order on that side'.
 #
 
-# ── BTC orders ──
+# -- BTC orders --
 # bid_price  bid_qty  ask_price  ask_qty
            0         0         103         2
          106         5           0         0
@@ -16,7 +16,7 @@
          104         3           0         0
           86         2           0         0
 
-# ── ETH orders ──
+# -- ETH orders --
 # bid_price  bid_qty  ask_price  ask_qty
            0         0           0         0
            0         0           0         0
@@ -29,7 +29,7 @@
          205         4         199         3
          202         3           0         0
 
-# ── SOL orders ──
+# -- SOL orders --
 # bid_price  bid_qty  ask_price  ask_qty
            0         0          63         4
           39         5           0         0

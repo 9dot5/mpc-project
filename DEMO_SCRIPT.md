@@ -89,11 +89,11 @@ python3 -B tests/edge_cases.py
 
 ### Q: What's the computational cost of keeping everything secret?
 
-**A**: After optimization, the main costs per asset are: (1) scanning 46 price levels × 30 orders = ~2,500 secret comparisons (down from ~25,000 with naive 201-level ladder), (2) 30 `sint/sint` divisions for pro-rata allocation. The 30 divisions dominate wall-clock time (~50–100× a multiplication each). Four optimizations yield a ~10× reduction in comparison/multiplication count.
+**A**: After optimization, the main costs per asset are: (1) scanning 46 price levels × 30 orders = ~2,500 secret comparisons (down from ~25,000 with naive 201-level ladder), (2) 30 sint/sint divisions for per-order pro-rata allocation. Five optimizations yield ~10× fewer comparisons. The 30 divisions per asset remain the dominant cost (~50-100× a multiplication each).
 
 ### Q: What optimizations did you apply?
 
-**A**: Four optimizations: (OPT-1) Per-asset price ranges — BTC [80,125], ETH [180,225], SOL [30,75] — reducing 201 to 46 levels per asset. (OPT-2) Removing redundant `(bp > 0)` checks for bids, since `(bp >= p)` with `p ≥ 1` already excludes zero bids. (OPT-4) Merging Steps C and D to avoid recomputing eligibility. (OPT-5) Precomputing `(ap > 0)` once per asset and reusing across all price levels. Combined: ~10× fewer comparisons, ~9× fewer multiplications.
+**A**: Five optimizations: (OPT-1) Per-asset price ranges [80,125], [180,225], [30,75] — 46 levels vs 201. (OPT-2) Remove redundant (bp > 0) checks. (OPT-4) Merge Steps C+D. (OPT-5) Precompute (ap > 0) once per asset. (OPT-7) Single-pass eligibility — eliminates 60 sint>=sint comparisons per asset. Combined: ~10× fewer comparisons.
 
 ### Q: What if two parties collude?
 
